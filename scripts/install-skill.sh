@@ -27,16 +27,47 @@ if [ ! -f "$source_dir/SKILL.md" ] || [ ! -x "$source_dir/bin/planctl" ]; then
   exit 1
 fi
 
+canonical_directory() {
+  (CDPATH= cd -- "$1" 2>/dev/null && pwd -P)
+}
+
+resolved_link_directory() {
+  link=$1
+  target=$2
+  case "$target" in
+    /*) canonical_directory "$target" ;;
+    *) canonical_directory "$(dirname -- "$link")/$target" ;;
+  esac
+}
+
+is_known_legacy_link() {
+  destination=$1
+  current=$2
+  [ -n "${PLANS_ROOT:-}" ] || return 1
+
+  hub_root=$(canonical_directory "$PLANS_ROOT") || return 1
+  legacy_source="$hub_root/skills/shared-plan-storage"
+  [ "$current" = "$legacy_source" ] && return 0
+
+  current_source=$(resolved_link_directory "$destination" "$current") || return 1
+  [ "$current_source" = "$legacy_source" ]
+}
+
 install_link() {
   destination=$1
   mkdir -p "$(dirname -- "$destination")"
   if [ -L "$destination" ]; then
     current=$(readlink "$destination")
-    if [ "$current" != "$source_dir" ]; then
+    if [ "$current" = "$source_dir" ]; then
+      echo "Already installed: $destination -> $source_dir"
+    elif is_known_legacy_link "$destination" "$current"; then
+      rm -- "$destination"
+      ln -s "$source_dir" "$destination"
+      echo "Upgraded legacy installation: $destination -> $source_dir"
+    else
       echo "install-skill: refusing to replace existing symlink: $destination -> $current" >&2
       exit 1
     fi
-    echo "Already installed: $destination -> $source_dir"
   elif [ -e "$destination" ]; then
     echo "install-skill: refusing to replace existing path: $destination" >&2
     exit 1

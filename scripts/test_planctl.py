@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("planctl.py")
+INSTALLER = Path(__file__).with_name("install-skill.sh")
 
 ORCHESTRATION = """# Plan Orchestration
 
@@ -81,6 +82,60 @@ class PlanctlTest(unittest.TestCase):
             env=environment,
         )
         self.assertEqual(0, explicit.returncode, explicit.stderr)
+
+    def test_installer_upgrades_only_selected_hub_legacy_link(self) -> None:
+        legacy_skill = self.root.resolve() / "skills" / "shared-plan-storage"
+        self.assertFalse(legacy_skill.exists(), "exercise the dangling post-migration legacy link")
+
+        with tempfile.TemporaryDirectory() as home_name:
+            home = Path(home_name)
+            destination = home / ".agents" / "skills" / "shared-plan-storage"
+            destination.parent.mkdir(parents=True)
+            destination.symlink_to(legacy_skill)
+            environment = {**os.environ, "HOME": str(home), "PLANS_ROOT": str(self.root)}
+
+            installed = subprocess.run(
+                [str(INSTALLER)],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+            self.assertEqual(0, installed.returncode, installed.stderr)
+            self.assertIn("Upgraded legacy installation", installed.stdout)
+            self.assertNotEqual(legacy_skill, destination.resolve())
+
+            wrapper = subprocess.run(
+                [str(destination / "bin" / "planctl"), "validate"],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+            self.assertEqual(0, wrapper.returncode, wrapper.stderr)
+
+        for existing_kind in ("symlink", "file"):
+            with self.subTest(existing_kind=existing_kind), tempfile.TemporaryDirectory() as home_name:
+                home = Path(home_name)
+                destination = home / ".agents" / "skills" / "shared-plan-storage"
+                destination.parent.mkdir(parents=True)
+                if existing_kind == "symlink":
+                    unknown = home / "unknown-skill"
+                    unknown.mkdir()
+                    destination.symlink_to(unknown)
+                else:
+                    destination.write_text("do not replace\n", encoding="utf-8")
+                environment = {**os.environ, "HOME": str(home), "PLANS_ROOT": str(self.root)}
+
+                rejected = subprocess.run(
+                    [str(INSTALLER)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=environment,
+                )
+                self.assertNotEqual(0, rejected.returncode)
+                self.assertIn("refusing to replace existing", rejected.stderr)
 
     def test_init_bootstraps_external_synthetic_hub(self) -> None:
         initialized = self.root / "initialized-hub"

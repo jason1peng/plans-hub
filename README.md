@@ -13,7 +13,7 @@ scripts/install-skill.sh              # Pi and Codex
 scripts/install-skill.sh --with-claude
 ```
 
-The installer links the client skill. It does not select or create private storage.
+The installer links the client skill. It does not select or create private storage. When `PLANS_ROOT` selects an existing hub, the installer safely upgrades the legacy `shared-plan-storage` link from that hub's former `skills/` directory; unrelated links and files are never replaced.
 
 ## Create or select a private hub
 
