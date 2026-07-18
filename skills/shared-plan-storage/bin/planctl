@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+client_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd -P)
+
+if [ ! -x "$client_root/scripts/planctl.py" ]; then
+  echo "planctl: cannot locate the plans-hub client at: $client_root" >&2
+  exit 1
+fi
+
+exec "$client_root/scripts/planctl.py" "$@"
