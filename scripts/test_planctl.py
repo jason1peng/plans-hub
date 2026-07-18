@@ -83,7 +83,8 @@ class PlanctlTest(unittest.TestCase):
         )
         self.assertEqual(0, explicit.returncode, explicit.stderr)
 
-    def test_installer_upgrades_only_selected_hub_legacy_link(self) -> None:
+    def test_documented_existing_hub_onboarding_upgrades_and_uses_installed_wrapper(self) -> None:
+        # The supported order is: select PLANS_ROOT, install, then invoke the full wrapper path.
         legacy_skill = self.root.resolve() / "skills" / "shared-plan-storage"
         self.assertFalse(legacy_skill.exists(), "exercise the dangling post-migration legacy link")
 
@@ -105,14 +106,23 @@ class PlanctlTest(unittest.TestCase):
             self.assertIn("Upgraded legacy installation", installed.stdout)
             self.assertNotEqual(legacy_skill, destination.resolve())
 
-            wrapper = subprocess.run(
-                [str(destination / "bin" / "planctl"), "validate"],
+            wrapper = destination / "bin" / "planctl"
+            validated = subprocess.run(
+                [str(wrapper), "validate"],
                 text=True,
                 capture_output=True,
                 check=False,
                 env=environment,
             )
-            self.assertEqual(0, wrapper.returncode, wrapper.stderr)
+            self.assertEqual(0, validated.returncode, validated.stderr)
+            listed = subprocess.run(
+                [str(wrapper), "list-ready"],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+            self.assertEqual(0, listed.returncode, listed.stderr)
 
         for existing_kind in ("symlink", "file"):
             with self.subTest(existing_kind=existing_kind), tempfile.TemporaryDirectory() as home_name:

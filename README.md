@@ -4,16 +4,19 @@ Public tooling for maintaining implementation plans in a **separate private Git 
 
 ## Install
 
-Clone this repository, then install the skill:
+Clone this repository, select an existing private hub before installation, then install the skill:
 
 ```sh
+export PLANS_ROOT=/path/to/private-hub # set first when upgrading an existing installation
 git clone https://github.com/jason1peng/plans-hub.git
 cd plans-hub
 scripts/install-skill.sh              # Pi and Codex
-scripts/install-skill.sh --with-claude
+# scripts/install-skill.sh --with-claude
+PLANCTL="$HOME/.agents/skills/shared-plan-storage/bin/planctl"
+"$PLANCTL" validate
 ```
 
-The installer links the client skill. It does not select or create private storage. When `PLANS_ROOT` selects an existing hub, the installer safely upgrades the legacy `shared-plan-storage` link from that hub's former `skills/` directory; unrelated links and files are never replaced.
+The installer links the client skill but does not add `planctl` to `PATH`; invoke the installed wrapper as shown above or use `scripts/planctl.py` from this checkout. It does not select or create private storage. When `PLANS_ROOT` selects an existing hub before installation, the installer safely upgrades the legacy `shared-plan-storage` link from that hub's former `skills/` directory; unrelated links and files are never replaced. For a new hub that does not exist yet, install without `PLANS_ROOT`, initialize it below, then export `PLANS_ROOT`.
 
 ## Create or select a private hub
 
@@ -52,6 +55,6 @@ python3 -m compileall -q scripts
 python3 scripts/check_public_release.py --history
 ```
 
-The release guard enforces an allowlisted tree and rejects plan-status files, findings, generated artifacts, credential-bearing URLs, and caller-supplied private fragments across the index and every reachable commit. Build releases only from fresh public history; never copy a private hub's `.git` directory or rewrite its history for publication.
+The release guard enforces an allowlisted tree and rejects plan-status files, findings, generated artifacts, credential-bearing URLs, every non-`DEMO` plan identifier, unapproved project-like kebab-case markers, and caller-supplied private fragments across the index and every reachable commit. Build releases only from fresh public history; never copy a private hub's `.git` directory or rewrite its history for publication.
 
 Licensed under the MIT License.
