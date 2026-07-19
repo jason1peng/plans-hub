@@ -33,16 +33,23 @@ PRIVATE_PROJECT_PREFIXES = {
 STANDALONE_UPPERCASE = re.compile(r"(?<![A-Z0-9_])([A-Z][A-Z0-9]{2,})(?![A-Z0-9_])")
 KEBAB_MARKER = re.compile(r"(?<![a-z0-9])([a-z0-9]+(?:-[a-z0-9]+)+)(?![a-z0-9])")
 ALLOWED_KEBAB_MARKERS = {
-    "0-9", "a-z0-9", "after-retired", "agent-name", "allow-empty", "caller-supplied", "cat-file", "ci-plan",
-    "completed-agent", "completed-dependency", "credential-bearing", "cycle-peer", "demo-001",
-    "demo-project", "dependency-agent", "downstream-agent", "fast-forward", "fetch-depth", "ff-only",
-    "first-plan", "force-push", "git-common-dir", "ignored-secret", "initialized-hub", "install-skill", "kebab-case",
-    "line-length", "list-ready", "low-contention", "ls-files", "ls-tree", "name-only", "non-empty",
-    "non-synthetic", "pi-subagents", "plan-hub", "plan-state", "plan-status", "plans-hub",
-    "post-migration", "private-hub", "project-like", "python-version", "re-evaluate", "re-run", "rev-list", "rev-parse",
-    "runs-on", "sample-plan", "setup-python", "shared-plan", "shared-plan-storage", "test-agent",
-    "top-level", "ubuntu-latest", "unknown-skill", "untracked-secret", "upstream-agent", "utf-8", "with-claude",
-    "working-tree",
+    "0-9", "a-z0-9", "after-retired", "agent-name", "allow-empty", "ambiguous-plan-id", "approval-required",
+    "automatic-safe", "caller-supplied", "cat-file", "ci-plan", "clean-state", "company-internal", "contract-violation",
+    "completed-agent", "completed-dependency", "credential-bearing", "cycle-peer", "demo-001", "dependency-cycle",
+    "demo-project", "dependency-agent", "downstream-agent", "dry-run", "duplicate-plan-id", "fast-forward",
+    "fetch-depth", "ff-only", "findings-lifecycle",
+    "first-plan", "force-push", "git-common-dir", "human-readable", "ignored-secret", "initialized-hub",
+    "install-skill", "invalid-claim", "it-backed",
+    "kebab-case", "lifecycle-mismatch", "line-length", "list-ready", "llm-proposal-handoff", "low-contention",
+    "ls-files", "ls-tree", "malformed-plan-id", "managed-plan", "manual-review", "metadata-id-mismatch",
+    "machine-local", "missing-dependency", "missing-orchestration-row", "name-only", "non-empty", "non-synthetic",
+    "pi-subagents",
+    "plan-hub", "plan-name", "plan-state", "plan-status", "plans-hub", "policy-aware", "provider-agnostic",
+    "post-migration", "private-hub", "project-like", "python-version", "read-only", "re-evaluate", "re-run",
+    "rev-list", "rev-parse", "root-not-directory", "runs-on", "sample-plan", "setup-python", "shared-plan",
+    "review-only", "shared-plan-storage", "stale-orchestration-row", "test-agent", "top-level", "ubuntu-latest",
+    "unknown-skill", "unmanaged-file", "unmanaged-plan-file", "untracked-secret", "upstream-agent", "utf-8",
+    "with-claude", "working-tree",
 }
 
 

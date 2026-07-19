@@ -30,6 +30,39 @@ scripts/planctl.py validate
 
 `--root PATH` overrides `PLANS_ROOT`. There is intentionally no fallback to the public client checkout. Keep the hub remote private and use credential helpers or SSH; do not put tokens in remote URLs or committed files.
 
+## Datastore contract and scanning
+
+The private repository is a passive Git-backed datastore; this client owns the managed-plan protocol. A managed plan:
+
+- is directly inside one registered lowercase kebab-case project folder;
+- uses `<status>--<ID>--<name>.md`, where status is `planning`, `ready`, `verifying`, or `done`;
+- has matching, unique `ID:` and `Status:` metadata;
+- uses a registered prefix and has one consistent row in `ORCHESTRATION.md`;
+- has valid dependencies, claim fields, and findings lifecycle state.
+
+Other Markdown deposited by any authoring tool is raw, unmanaged input. It remains in the datastore but is inactive: it cannot become ready, satisfy a dependency, receive a claim, or influence ID allocation. A raw file that mentions an active or duplicate ID is reported as ambiguous and blocks policy-aware operations until reviewed; unrelated raw input does not block managed work.
+
+Scan without changing any file:
+
+```sh
+scripts/planctl.py --root "$PLANS_ROOT" scan
+scripts/planctl.py --root "$PLANS_ROOT" scan --json
+```
+
+Structured output has `schema_version`, project, managed-plan, unmanaged-file, diagnostic, and clean-state fields. Diagnostics cover filename/metadata disagreement, malformed or duplicate IDs, lifecycle mismatches, missing or stale orchestration rows, dependency targets and cycles, claims, and findings links. Consumers must use fields rather than scrape human-readable prose.
+
+## Reviewable repair proposals
+
+`repair` is dry-run by default. It classifies proposals as `automatic-safe`, `approval-required`, or `unsupported` and never commits or pushes:
+
+```sh
+scripts/planctl.py --root "$PLANS_ROOT" repair --json
+scripts/planctl.py --root "$PLANS_ROOT" repair --apply --json  # automatic-safe proposals only
+scripts/planctl.py --root "$PLANS_ROOT" repair --llm --json    # provider-agnostic proposal handoff
+```
+
+Automatic repair is restricted to structural facts whose status and ID agree, such as normalizing only a plan-name slug and adding the corresponding empty orchestration row. `--apply` refuses while any semantic or ambiguous diagnostic remains. The LLM handoff contains structured diagnostics and explicit constraints; it can propose a patch only. ID assignment, lifecycle, dependencies, claims, deletion, conflict resolution, application, commits, and pushes always remain explicit host/user actions.
+
 ## Team synchronization workflow
 
 The first release uses explicit, low-contention Git synchronization rather than claiming atomic distributed scheduling:

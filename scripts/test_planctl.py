@@ -440,6 +440,55 @@ class PlanctlTest(unittest.TestCase):
         self.run_cli("claim", "DEMO-006", "bad`agent", succeeds=False)
         self.run_cli("validate")
 
+    def test_scan_inventories_unmanaged_input_without_activating_it(self) -> None:
+        self.run_cli("allocate", "DEMO", "managed")
+        self.run_cli("status", "DEMO-001", "ready")
+        raw = self.root / "demo-project" / "idea from another tool.md"
+        raw.write_text("# Idea\n\nThis is deliberately not a managed plan.\n", encoding="utf-8")
+
+        scan = self.run_cli("scan", "--json")
+        payload = __import__("json").loads(scan.stdout)
+
+        self.assertEqual(["DEMO-001"], [plan["id"] for plan in payload["managed_plans"]])
+        self.assertEqual("demo-project/idea from another tool.md", payload["unmanaged_files"][0]["path"])
+        self.assertEqual("unmanaged-plan-file", payload["diagnostics"][0]["code"])
+        self.run_cli("ready", "DEMO-001")
+
+    def test_ambiguous_unmanaged_id_blocks_only_policy_operations(self) -> None:
+        self.run_cli("allocate", "DEMO", "managed")
+        self.run_cli("status", "DEMO-001", "ready")
+        raw = self.root / "demo-project" / "draft.md"
+        raw.write_text("# Duplicate\n\nID: DEMO-001\nStatus: ready\n", encoding="utf-8")
+
+        scan = self.run_cli("scan", "--json")
+        payload = __import__("json").loads(scan.stdout)
+        self.assertIn("ambiguous-plan-id", {item["code"] for item in payload["diagnostics"]})
+        blocked = self.run_cli("ready", "DEMO-001", succeeds=False)
+        self.assertIn("ambiguous unmanaged input", blocked.stderr)
+
+    def test_repair_is_dry_run_and_llm_handoff_never_mutates(self) -> None:
+        project = self.root / "demo-project"
+        project.mkdir()
+        source = project / "planning--DEMO-001--Sample Plan.md"
+        source.write_text("# Sample plan\n\nID: DEMO-001\nStatus: planning\n", encoding="utf-8")
+
+        dry_run = self.run_cli("repair", "--json")
+        payload = __import__("json").loads(dry_run.stdout)
+        self.assertEqual("automatic-safe", payload["proposals"][0]["classification"])
+        self.assertTrue(source.exists())
+        self.assertFalse((project / "planning--DEMO-001--sample-plan.md").exists())
+
+        llm = self.run_cli("repair", "--llm", "--json")
+        handoff = __import__("json").loads(llm.stdout)
+        self.assertTrue(handoff["review_required"])
+        self.assertFalse(handoff["may_commit_or_push"])
+        self.assertTrue(source.exists())
+
+        applied = self.run_cli("repair", "--apply", "--json")
+        self.assertIn('"applied": true', applied.stdout)
+        self.assertFalse(source.exists())
+        self.assertTrue((project / "planning--DEMO-001--sample-plan.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

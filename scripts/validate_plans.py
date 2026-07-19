@@ -117,7 +117,8 @@ def find_plans(root: Path, errors: list[str]) -> dict[str, dict[str, object]]:
         for plan_file in sorted(project_dir.glob("*.md")):
             match = STATUS_RE.fullmatch(plan_file.name)
             if not match:
-                errors.append(f"Invalid plan filename: {plan_file.relative_to(root)}")
+                # Arbitrary Markdown is passive datastore input. It is inventoried by
+                # scan(), but never enters managed orchestration state.
                 continue
             status, plan_id, plan_name = match.groups()
             if plan_id in plans:
@@ -199,6 +200,189 @@ def detect_cycles(entries: dict[str, dict[str, object]], errors: list[str]) -> N
         visit(plan_id, [])
 
 
+def _diagnostic(code: str, message: str, *, path: str | None = None, plan_id: str | None = None,
+                severity: str = "error", repair: str = "unsupported") -> dict[str, object]:
+    item: dict[str, object] = {
+        "code": code,
+        "severity": severity,
+        "message": message,
+        "repair_classification": repair,
+    }
+    if path is not None:
+        item["path"] = path
+    if plan_id is not None:
+        item["plan_id"] = plan_id
+    return item
+
+
+def scan(root: Path) -> dict[str, object]:
+    """Inventory raw files and managed state without mutating the datastore."""
+    diagnostics: list[dict[str, object]] = []
+    unmanaged: list[dict[str, object]] = []
+    managed: list[dict[str, object]] = []
+    projects: list[str] = []
+    if not root.is_dir():
+        return {
+            "schema_version": 1,
+            "root": str(root),
+            "projects": [],
+            "managed_plans": [],
+            "unmanaged_files": [],
+            "diagnostics": [_diagnostic("root-not-directory", f"Plans root is not a directory: {root}")],
+            "clean": False,
+        }
+
+    registry_errors: list[str] = []
+    prefixes, entries, _ = parse_registry(root / "ORCHESTRATION.md", registry_errors)
+    managed_ids: set[str] = set()
+    syntactic_ids: dict[str, list[str]] = {}
+    unmanaged_ids: dict[str, list[str]] = {}
+    loose_name_re = re.compile(
+        r"^(planning|ready|verifying|done)--([A-Z][A-Z0-9]*-[0-9]{3,})--(.+)\.md$"
+    )
+    metadata_id_re = re.compile(r"(?m)^ID:\s*([^\s]+)\s*$")
+
+    for project_dir in sorted(
+        path for path in root.iterdir()
+        if path.is_dir() and path.name not in RESERVED_DIRS and not path.name.startswith(".")
+    ):
+        projects.append(project_dir.name)
+        for path in sorted(project_dir.glob("*.md")):
+            relative = str(path.relative_to(root))
+            text = path.read_text(encoding="utf-8")
+            match = STATUS_RE.fullmatch(path.name)
+            if match:
+                status, plan_id, name = match.groups()
+                syntactic_ids.setdefault(plan_id, []).append(relative)
+                metadata_id_ok = bool(re.search(rf"(?m)^ID:\s*{re.escape(plan_id)}\s*$", text))
+                metadata_status_ok = bool(re.search(rf"(?m)^Status:\s*{re.escape(status)}\s*$", text))
+                prefix_match = ID_RE.fullmatch(plan_id)
+                expected_project = prefixes.get(prefix_match.group(1) if prefix_match else "")
+                entry = entries.get(plan_id)
+                contract_ok = (
+                    metadata_id_ok
+                    and metadata_status_ok
+                    and expected_project == project_dir.name
+                    and entry is not None
+                    and entry["project"] == project_dir.name
+                )
+                if contract_ok:
+                    managed_ids.add(plan_id)
+                    managed.append({
+                        "id": plan_id,
+                        "status": status,
+                        "project": project_dir.name,
+                        "name": name,
+                        "path": relative,
+                    })
+                else:
+                    unmanaged_ids.setdefault(plan_id, []).append(relative)
+                    unmanaged.append({
+                        "path": relative,
+                        "observed_id": plan_id,
+                        "reason": "managed filename failed metadata or orchestration contract",
+                    })
+                continue
+
+            metadata_match = metadata_id_re.search(text)
+            raw_id = metadata_match.group(1) if metadata_match else None
+            if raw_id and ID_RE.fullmatch(raw_id):
+                unmanaged_ids.setdefault(raw_id, []).append(relative)
+            proposal: dict[str, object] | None = None
+            loose = loose_name_re.fullmatch(path.name)
+            if loose and raw_id == loose.group(2) and re.search(
+                rf"(?m)^Status:\s*{re.escape(loose.group(1))}\s*$", text
+            ):
+                slug = re.sub(r"[^a-z0-9]+", "-", loose.group(3).lower()).strip("-")
+                if slug:
+                    target = path.with_name(f"{loose.group(1)}--{loose.group(2)}--{slug}.md")
+                    if target != path and not target.exists():
+                        proposal = {
+                            "kind": "rename",
+                            "from": relative,
+                            "to": str(target.relative_to(root)),
+                            "classification": "automatic-safe",
+                            "reason": "filename status and ID agree with metadata; normalize only the plan-name slug",
+                        }
+            unmanaged_item: dict[str, object] = {"path": relative, "reason": "filename is outside managed contract"}
+            if raw_id:
+                unmanaged_item["observed_id"] = raw_id
+            if proposal:
+                unmanaged_item["repair_proposal"] = proposal
+            unmanaged.append(unmanaged_item)
+            diagnostics.append(_diagnostic(
+                "unmanaged-plan-file",
+                "Markdown input is inactive because its filename does not satisfy the managed-plan contract",
+                path=relative,
+                plan_id=raw_id,
+                severity="warning",
+                repair="automatic-safe" if proposal else "approval-required",
+            ))
+            if raw_id and not ID_RE.fullmatch(raw_id):
+                diagnostics.append(_diagnostic("malformed-plan-id", f"Invalid metadata ID {raw_id!r}", path=relative))
+
+    duplicate_ids = {plan_id for plan_id, paths in syntactic_ids.items() if len(paths) > 1}
+    if duplicate_ids:
+        kept: list[dict[str, object]] = []
+        for item in managed:
+            if item["id"] in duplicate_ids:
+                unmanaged.append({"path": item["path"], "observed_id": item["id"], "reason": "duplicate managed ID"})
+                unmanaged_ids.setdefault(str(item["id"]), []).append(str(item["path"]))
+                managed_ids.discard(str(item["id"]))
+            else:
+                kept.append(item)
+        managed = kept
+
+    for plan_id, paths in sorted(unmanaged_ids.items()):
+        if plan_id in managed_ids or len(paths) > 1 or plan_id in duplicate_ids:
+            diagnostics.append(_diagnostic(
+                "ambiguous-plan-id",
+                f"Unmanaged input mentions active or duplicate ID {plan_id}: {', '.join(sorted(set(paths)))}",
+                plan_id=plan_id,
+                repair="approval-required",
+            ))
+
+    code_rules = (
+        ("missing or inconsistent ID", "metadata-id-mismatch"),
+        ("missing or inconsistent Status", "lifecycle-mismatch"),
+        ("multiple files", "duplicate-plan-id"),
+        ("missing from orchestration", "missing-orchestration-row"),
+        ("Orchestration entry has no plan file", "stale-orchestration-row"),
+        ("unresolved dependency", "missing-dependency"),
+        ("Dependency cycle", "dependency-cycle"),
+        ("claim", "invalid-claim"),
+        ("findings", "findings-lifecycle"),
+        ("Findings", "findings-lifecycle"),
+    )
+    for message in validate(root):
+        code = "contract-violation"
+        for fragment, candidate in code_rules:
+            if fragment in message:
+                code = candidate
+                break
+        diagnostics.append(_diagnostic(code, message, repair="approval-required"))
+
+    return {
+        "schema_version": 1,
+        "root": str(root),
+        "projects": projects,
+        "managed_plans": managed,
+        "unmanaged_files": unmanaged,
+        "diagnostics": diagnostics,
+        "clean": not diagnostics,
+    }
+
+
+def policy_errors(root: Path) -> list[str]:
+    """Return violations that can make policy-aware mutations unsafe."""
+    errors = validate(root)
+    report = scan(root)
+    for item in report["diagnostics"]:
+        if item["code"] == "ambiguous-plan-id":
+            errors.append(f"ambiguous unmanaged input: {item['message']}")
+    return errors
+
+
 def validate(root: Path) -> list[str]:
     errors: list[str] = []
     if not root.is_dir():
@@ -237,6 +421,10 @@ def validate(root: Path) -> list[str]:
         has_time = claimed_at.lower() not in EMPTY_VALUES
         if has_claimant != has_time:
             errors.append(f"Plan {plan_id!r} must set or clear both claim fields")
+        if has_claimant and not re.fullmatch(r"[A-Za-z0-9._@:/+-]+", claimed_by):
+            errors.append(f"Plan {plan_id!r} has invalid claimant {claimed_by!r}")
+        if has_time and not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", claimed_at):
+            errors.append(f"Plan {plan_id!r} has invalid claim timestamp {claimed_at!r}")
         if has_claimant and plan["status"] not in {"ready", "verifying"}:
             errors.append(f"Plan {plan_id!r} cannot be claimed while status is {plan['status']!r}")
         dependencies_must_be_done = has_claimant or plan["status"] in {"verifying", "done"}

@@ -1,3 +1,7 @@
 # Agent Instructions
 
-Read `README.md` and `ORCHESTRATION.md` before changing plan state. Resolve IDs with `$HOME/.agents/skills/shared-plan-storage/bin/planctl show` (the installer does not add `planctl` to `PATH`), synchronize with the private remote before reading or writing, claim ready work before implementation, validate every state change, and commit only related files. Never force-push a claim. After a rejected push, fetch and re-evaluate current readiness and claim state instead of retrying blindly.
+Treat this repository as company-internal plan data, not policy implementation. Read `README.md` and `ORCHESTRATION.md`, synchronize with the private remote before reading or writing shared state, and preserve existing stable IDs and unrelated files.
+
+A compatible external client may scan or maintain managed plans. When using `plans-hub`, select this checkout explicitly, resolve IDs through the client, claim ready work before implementation, validate each state change, and commit only related files. Never force-push a claim; after a rejected push, fetch and re-evaluate current state rather than replaying blindly.
+
+Raw files from other tools may remain in the datastore as inactive input. Do not silently assign IDs, change lifecycle, dependencies, or claims, delete content, or commit repair proposals without explicit review.

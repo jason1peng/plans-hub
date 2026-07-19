@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import importlib
+import json
 import os
 import re
 import shutil
@@ -49,7 +50,7 @@ def empty(value: str) -> bool:
 
 
 def validate_or_raise(root: Path) -> None:
-    errors = validator.validate(root)
+    errors = validator.policy_errors(root)
     if errors:
         raise PlanError("Repository validation failed:\n- " + "\n- ".join(errors))
 
@@ -166,6 +167,112 @@ def command_init(root: Path, _args: argparse.Namespace) -> None:
 def command_validate(root: Path, _args: argparse.Namespace) -> None:
     validate_or_raise(root)
     print(f"Plan storage validation passed: {root}")
+
+
+def command_scan(root: Path, args: argparse.Namespace) -> None:
+    report = validator.scan(root)
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return
+    print(f"Plan datastore scan: {root}")
+    print(f"Projects: {len(report['projects'])}")
+    print(f"Managed plans: {len(report['managed_plans'])}")
+    print(f"Unmanaged files: {len(report['unmanaged_files'])}")
+    print(f"Diagnostics: {len(report['diagnostics'])}")
+    for item in report["diagnostics"]:
+        location = f" ({item['path']})" if "path" in item else ""
+        print(f"- [{item['severity']}] {item['code']}{location}: {item['message']}")
+
+
+def repair_proposals(root: Path, report: dict[str, object]) -> list[dict[str, object]]:
+    proposals: list[dict[str, object]] = []
+    registry_errors: list[str] = []
+    _, entries, _ = validator.parse_registry(root / "ORCHESTRATION.md", registry_errors)
+    for item in report["unmanaged_files"]:
+        proposal = item.get("repair_proposal")
+        if proposal:
+            proposal = dict(proposal)
+            target_match = validator.STATUS_RE.fullmatch(Path(str(proposal["to"])).name)
+            patch_lines = [f"rename {proposal['from']} => {proposal['to']}"]
+            if target_match and target_match.group(2) not in entries:
+                plan_id = target_match.group(2)
+                project = Path(str(proposal["to"])).parts[0]
+                proposal["orchestration_row"] = f"| `{plan_id}` | `{project}` | — | — | — |"
+                patch_lines.append(f"ORCHESTRATION.md: + {proposal['orchestration_row']}")
+            proposal["patch"] = "\n".join(patch_lines)
+            proposals.append(proposal)
+    for item in report["diagnostics"]:
+        if item["code"] != "unmanaged-plan-file" and not any(
+            proposal.get("from") == item.get("path") for proposal in proposals
+        ):
+            proposals.append({
+                "kind": "manual-review",
+                "classification": item["repair_classification"],
+                "diagnostic_code": item["code"],
+                "reason": item["message"],
+            })
+    return proposals
+
+
+def command_repair(root: Path, args: argparse.Namespace) -> None:
+    report = validator.scan(root)
+    proposals = repair_proposals(root, report)
+    if args.llm:
+        payload = {
+            "schema_version": 1,
+            "mode": "llm-proposal-handoff",
+            "review_required": True,
+            "may_apply": False,
+            "may_commit_or_push": False,
+            "prohibited_changes": [
+                "silent ID assignment or renumbering",
+                "lifecycle, dependency, or claim changes",
+                "deletion, commit, push, or conflict resolution",
+            ],
+            "diagnostics": report["diagnostics"],
+            "instruction": "Propose an inspectable patch only; a user or host must review and apply it explicitly.",
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print("LLM repair handoff (proposal only; review required)")
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    applied = False
+    if args.apply:
+        unsafe = [item for item in proposals if item["classification"] != "automatic-safe"]
+        if unsafe:
+            raise PlanError("refusing --apply because approval-required or unsupported diagnostics remain")
+        original_orchestration = (root / "ORCHESTRATION.md").read_text(encoding="utf-8")
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for proposal in proposals:
+                if proposal["kind"] != "rename":
+                    continue
+                source = root / str(proposal["from"])
+                target = root / str(proposal["to"])
+                source.replace(target)
+                moved.append((source, target))
+                row = proposal.get("orchestration_row")
+                if row:
+                    insert_graph_row(root, str(row))
+            validate_or_raise(root)
+            applied = True
+        except Exception:
+            atomic_write(root / "ORCHESTRATION.md", original_orchestration)
+            for source, target in reversed(moved):
+                if target.exists():
+                    target.replace(source)
+            raise
+
+    payload = {"schema_version": 1, "dry_run": not args.apply, "applied": applied, "proposals": proposals}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("Applied automatic-safe repairs" if applied else "Repair proposals (dry-run; no files changed)")
+        for proposal in proposals:
+            print(f"- [{proposal['classification']}] {proposal['kind']}: {proposal['reason']}")
 
 
 def command_show(root: Path, args: argparse.Namespace) -> None:
@@ -381,6 +488,17 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("init").set_defaults(handler=command_init)
     commands.add_parser("validate").set_defaults(handler=command_validate)
     commands.add_parser("list-ready").set_defaults(handler=command_list_ready)
+
+    scan = commands.add_parser("scan", help="read-only inventory of managed and unmanaged datastore input")
+    scan.add_argument("--json", action="store_true", help="emit the versioned structured report")
+    scan.set_defaults(handler=command_scan)
+
+    repair = commands.add_parser("repair", help="propose safe, reviewable repairs (dry-run by default)")
+    repair.add_argument("--json", action="store_true", help="emit structured proposals")
+    repair_mode = repair.add_mutually_exclusive_group()
+    repair_mode.add_argument("--apply", action="store_true", help="apply automatic-safe proposals only")
+    repair_mode.add_argument("--llm", action="store_true", help="emit a provider-agnostic semantic repair handoff")
+    repair.set_defaults(handler=command_repair)
 
     show = commands.add_parser("show")
     show.add_argument("id")
