@@ -225,15 +225,15 @@ def repair_proposals(root: Path, report: dict[str, object]) -> list[dict[str, ob
             proposal["patch"] = "\n".join(patch_lines)
             proposals.append(proposal)
     for item in report["diagnostics"]:
-        if item["code"] != "unmanaged-plan-file" and not any(
-            proposal.get("from") == item.get("path") for proposal in proposals
-        ):
-            proposals.append({
-                "kind": "manual-review",
-                "classification": item["repair_classification"],
-                "diagnostic_code": item["code"],
-                "reason": item["message"],
-            })
+        has_file_proposal = any(proposal.get("from") == item.get("path") for proposal in proposals)
+        if item["code"] == "unmanaged-plan-file" and has_file_proposal:
+            continue
+        proposals.append({
+            "kind": "manual-review",
+            "classification": item["repair_classification"],
+            "diagnostic_code": item["code"],
+            "reason": item["message"],
+        })
     return proposals
 
 

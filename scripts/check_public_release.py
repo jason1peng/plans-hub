@@ -39,7 +39,7 @@ ALLOWED_KEBAB_MARKERS = {
     "demo-project", "dependency-agent", "downstream-agent", "dry-run", "duplicate-plan-id", "fast-forward",
     "fetch-depth", "ff-only", "findings-lifecycle",
     "first-plan", "force-push", "git-common-dir", "human-readable", "ignored-secret", "initialized-hub",
-    "install-skill", "invalid-claim", "invalid-managed-candidate", "it-backed",
+    "install-skill", "invalid-claim", "invalid-managed-candidate", "invalid-project-folder", "it-backed",
     "kebab-case", "lifecycle-mismatch", "line-length", "list-ready", "llm-proposal-handoff", "low-contention",
     "ls-files", "ls-tree", "malformed-plan-id", "managed-plan", "managed-state", "manual-review", "metadata-id-mismatch",
     "machine-local", "missing-dependency", "missing-orchestration-row", "name-only", "non-empty", "non-synthetic",

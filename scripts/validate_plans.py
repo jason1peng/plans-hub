@@ -224,6 +224,8 @@ def validate_findings(
                 continue
             elif plans[findings_dir.name]["project"] != project_dir.name:
                 errors.append(f"Findings directory is under wrong project: {findings_dir.relative_to(root)}")
+                if invalid_ids is not None:
+                    invalid_ids.add(findings_dir.name)
 
 
 def detect_cycles(
@@ -290,16 +292,29 @@ def scan(root: Path) -> dict[str, object]:
     managed_ids: set[str] = set()
     syntactic_ids: dict[str, list[str]] = {}
     unmanaged_ids: dict[str, list[str]] = {}
+    unmanaged_id_mentions: dict[str, int] = {}
     loose_name_re = re.compile(
         r"^(planning|ready|verifying|done)--([A-Z][A-Z0-9]*-[0-9]{3,})--(.+)\.md$"
     )
-    metadata_id_re = re.compile(r"(?m)^ID:\s*([^\s]+)\s*$")
+
+    def record_unmanaged_id(plan_id: str, relative: str) -> None:
+        if ID_RE.fullmatch(plan_id):
+            unmanaged_ids.setdefault(plan_id, []).append(relative)
+            unmanaged_id_mentions[plan_id] = unmanaged_id_mentions.get(plan_id, 0) + 1
 
     for project_dir in sorted(
         path for path in root.iterdir()
         if path.is_dir() and path.name not in RESERVED_DIRS and not path.name.startswith(".")
     ):
         projects.append(project_dir.name)
+        if not PROJECT_RE.fullmatch(project_dir.name):
+            diagnostics.append(_diagnostic(
+                "invalid-project-folder",
+                "Project folder is outside the managed contract; use a lowercase kebab-case name",
+                path=project_dir.name,
+                severity="warning",
+                repair="approval-required",
+            ))
         for path in sorted(project_dir.glob("*.md")):
             relative = str(path.relative_to(root))
             text = path.read_text(encoding="utf-8")
@@ -329,7 +344,19 @@ def scan(root: Path) -> dict[str, object]:
                         "path": relative,
                     })
                 else:
-                    unmanaged_ids.setdefault(plan_id, []).append(relative)
+                    # A sole registered candidate that fails its own contract is
+                    # scoped invalid state, not global identity ambiguity. Other
+                    # active IDs mentioned by that candidate remain ambiguous.
+                    id_values = metadata_values(text, "ID")
+                    if entry is None:
+                        for metadata_id in id_values:
+                            record_unmanaged_id(metadata_id, relative)
+                        if plan_id not in id_values:
+                            record_unmanaged_id(plan_id, relative)
+                    else:
+                        for metadata_id in id_values:
+                            if metadata_id != plan_id and metadata_id in entries:
+                                record_unmanaged_id(metadata_id, relative)
                     reason = "managed filename failed metadata or orchestration contract"
                     unmanaged.append({
                         "path": relative,
@@ -344,16 +371,35 @@ def scan(root: Path) -> dict[str, object]:
                         severity="warning" if entry is None else "error",
                         repair="approval-required",
                     ))
+                    if len(id_values) > 1:
+                        diagnostics.append(_diagnostic(
+                            "metadata-id-mismatch",
+                            "Raw input has repeated or conflicting ID metadata",
+                            path=relative,
+                            plan_id=plan_id,
+                            repair="approval-required",
+                        ))
+                    if len(metadata_values(text, "Status")) > 1:
+                        diagnostics.append(_diagnostic(
+                            "lifecycle-mismatch",
+                            "Raw input has repeated or conflicting Status metadata",
+                            path=relative,
+                            plan_id=plan_id,
+                            repair="approval-required",
+                        ))
                 continue
 
-            metadata_match = metadata_id_re.search(text)
-            raw_id = metadata_match.group(1) if metadata_match else None
-            if raw_id and ID_RE.fullmatch(raw_id):
-                unmanaged_ids.setdefault(raw_id, []).append(relative)
+            raw_ids = metadata_values(text, "ID")
+            raw_statuses = metadata_values(text, "Status")
+            for raw_id in raw_ids:
+                record_unmanaged_id(raw_id, relative)
+            observed_id = raw_ids[0] if len(raw_ids) == 1 else None
             proposal: dict[str, object] | None = None
             loose = loose_name_re.fullmatch(path.name)
-            if loose and raw_id == loose.group(2) and re.search(
-                rf"(?m)^Status:\s*{re.escape(loose.group(1))}\s*$", text
+            if (
+                loose
+                and raw_ids == [loose.group(2)]
+                and raw_statuses == [loose.group(1)]
             ):
                 slug = re.sub(r"[^a-z0-9]+", "-", loose.group(3).lower()).strip("-")
                 if slug:
@@ -367,8 +413,8 @@ def scan(root: Path) -> dict[str, object]:
                             "reason": "filename status and ID agree with metadata; normalize only the plan-name slug",
                         }
             unmanaged_item: dict[str, object] = {"path": relative, "reason": "filename is outside managed contract"}
-            if raw_id:
-                unmanaged_item["observed_id"] = raw_id
+            if observed_id:
+                unmanaged_item["observed_id"] = observed_id
             if proposal:
                 unmanaged_item["repair_proposal"] = proposal
             unmanaged.append(unmanaged_item)
@@ -376,12 +422,29 @@ def scan(root: Path) -> dict[str, object]:
                 "unmanaged-plan-file",
                 "Markdown input is inactive because its filename does not satisfy the managed-plan contract",
                 path=relative,
-                plan_id=raw_id,
+                plan_id=observed_id,
                 severity="warning",
                 repair="automatic-safe" if proposal else "approval-required",
             ))
-            if raw_id and not ID_RE.fullmatch(raw_id):
-                diagnostics.append(_diagnostic("malformed-plan-id", f"Invalid metadata ID {raw_id!r}", path=relative))
+            if len(raw_ids) > 1:
+                diagnostics.append(_diagnostic(
+                    "metadata-id-mismatch",
+                    "Raw input has repeated or conflicting ID metadata",
+                    path=relative,
+                    repair="approval-required",
+                ))
+            if len(raw_statuses) > 1:
+                diagnostics.append(_diagnostic(
+                    "lifecycle-mismatch",
+                    "Raw input has repeated or conflicting Status metadata",
+                    path=relative,
+                    repair="approval-required",
+                ))
+            for raw_id in raw_ids:
+                if not ID_RE.fullmatch(raw_id):
+                    diagnostics.append(_diagnostic(
+                        "malformed-plan-id", f"Invalid metadata ID {raw_id!r}", path=relative
+                    ))
 
     duplicate_ids = {plan_id for plan_id, paths in syntactic_ids.items() if len(paths) > 1}
     if duplicate_ids:
@@ -389,7 +452,7 @@ def scan(root: Path) -> dict[str, object]:
         for item in managed:
             if item["id"] in duplicate_ids:
                 unmanaged.append({"path": item["path"], "observed_id": item["id"], "reason": "duplicate managed ID"})
-                unmanaged_ids.setdefault(str(item["id"]), []).append(str(item["path"]))
+                record_unmanaged_id(str(item["id"]), str(item["path"]))
                 managed_ids.discard(str(item["id"]))
             else:
                 kept.append(item)
@@ -397,7 +460,7 @@ def scan(root: Path) -> dict[str, object]:
 
     for plan_id, paths in sorted(unmanaged_ids.items()):
         unique_paths = sorted(set(paths))
-        if plan_id in entries or plan_id in managed_ids or len(unique_paths) > 1:
+        if plan_id in entries or plan_id in managed_ids or unmanaged_id_mentions[plan_id] > 1:
             diagnostics.append(_diagnostic(
                 "ambiguous-plan-id",
                 f"Unmanaged input mentions active or duplicate ID {plan_id}: {', '.join(unique_paths)}",
