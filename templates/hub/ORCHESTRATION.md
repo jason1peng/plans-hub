@@ -1,5 +1,7 @@
 # Plan Orchestration
 
+This file stores the prefix registry, dependency rows, claims, and retired IDs. The external plans client owns validation and maintenance policy; preserve existing state when using other tools.
+
 ## Project prefix registry
 
 | Prefix | Project folder |
@@ -16,6 +18,6 @@
 | ID | Project |
 | --- | --- |
 
-## Coordination rules
+## Stable safety
 
-Synchronize before changing state, never force-push, and re-evaluate after a rejected push.
+Synchronize before changing shared state, preserve IDs, never force-push, and re-evaluate after a rejected push.

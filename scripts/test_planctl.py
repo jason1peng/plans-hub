@@ -440,6 +440,430 @@ class PlanctlTest(unittest.TestCase):
         self.run_cli("claim", "DEMO-006", "bad`agent", succeeds=False)
         self.run_cli("validate")
 
+    def test_tool_agnostic_ingestion_converges_in_isolated_git_clones(self) -> None:
+        """Exercise the P3 ingestion and approval boundary using only synthetic data."""
+        with tempfile.TemporaryDirectory() as workspace_name:
+            workspace = Path(workspace_name)
+            seed = workspace / "seed"
+            remote = workspace / "remote.git"
+            depositor = workspace / "depositor"
+            verifier = workspace / "verifier"
+
+            initialized = subprocess.run(
+                ["python3", str(SCRIPT), "--root", str(seed), "init"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, initialized.returncode, initialized.stderr)
+            subprocess.run(["git", "-C", str(seed), "init", "-q", "-b", "main"], check=True)
+            subprocess.run(["git", "-C", str(seed), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(seed), "config", "user.name", "Test"], check=True)
+
+            def cli(root: Path, *arguments: str, succeeds: bool = True) -> subprocess.CompletedProcess[str]:
+                result = subprocess.run(
+                    ["python3", str(SCRIPT), "--root", str(root), *arguments],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if succeeds:
+                    self.assertEqual(0, result.returncode, result.stderr)
+                else:
+                    self.assertNotEqual(0, result.returncode, result.stdout)
+                return result
+
+            cli(seed, "allocate", "DEMO", "managed")
+            subprocess.run(["git", "-C", str(seed), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(seed), "commit", "-qm", "initialize datastore"], check=True)
+            subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(seed), "remote", "add", "origin", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(seed), "push", "-q", "-u", "origin", "main"], check=True)
+            subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(depositor)], check=True)
+            subprocess.run(["git", "-C", str(depositor), "config", "user.email", "tool@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(depositor), "config", "user.name", "External Tool"], check=True)
+
+            # Another author deposits good, malformed, ambiguous, and unregistered
+            # files in distinct project folders, then publishes them as ordinary Git data.
+            additions = {
+                "private-hub/planning--DEMO-002--Sample Plan.md":
+                    "# Normalize me\n\nID: DEMO-002\nStatus: planning\n",
+                "plan-hub/draft.md": "# Malformed\n\nID: invalid\nStatus: planning\n",
+                "initialized-hub/planning--DEMO-003--external.md":
+                    "# Unregistered\n\nID: DEMO-003\nStatus: planning\n",
+                "private-hub/ambiguous.md":
+                    "# Ambiguous\n\nID: DEMO-001\nStatus: planning\n",
+            }
+            for relative, content in additions.items():
+                path = depositor / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            subprocess.run(["git", "-C", str(depositor), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(depositor), "commit", "-qm", "external tool ingestion"], check=True)
+            subprocess.run(["git", "-C", str(depositor), "push", "-q"], check=True)
+
+            subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(verifier)], check=True)
+            # The fresh clone is understandable before installing or invoking this client.
+            self.assertTrue((verifier / "README.md").is_file())
+            self.assertTrue((verifier / "ORCHESTRATION.md").is_file())
+            self.assertIn("ID: DEMO-001", subprocess.run(
+                ["git", "-C", str(verifier), "show", "HEAD:demo-project/planning--DEMO-001--managed.md"],
+                text=True, capture_output=True, check=True,
+            ).stdout)
+
+            def normalized_snapshot(root: Path) -> tuple[tuple[str, str], ...]:
+                return tuple(
+                    (path.relative_to(root).as_posix(), path.read_text(encoding="utf-8"))
+                    for path in sorted(root.rglob("*.md"))
+                    if ".git" not in path.relative_to(root).parts
+                )
+
+            before_scan = normalized_snapshot(verifier)
+            report = __import__("json").loads(cli(verifier, "scan", "--json").stdout)
+            self.assertEqual(before_scan, normalized_snapshot(verifier), "scan must be read-only")
+            self.assertEqual(["DEMO-001"], [item["id"] for item in report["managed_plans"]])
+            codes = {item["code"] for item in report["diagnostics"]}
+            self.assertTrue({
+                "unmanaged-plan-file", "malformed-plan-id", "ambiguous-plan-id",
+                "unregistered-plan-file",
+            } <= codes)
+            unregistered = [
+                item for item in report["diagnostics"]
+                if item["code"] == "unregistered-plan-file" and item.get("plan_id") == "DEMO-003"
+            ]
+            self.assertEqual(1, len(unregistered))
+            self.assertEqual(
+                "initialized-hub/planning--DEMO-003--external.md",
+                unregistered[0]["path"],
+            )
+            self.assertEqual("approval-required", unregistered[0]["repair_classification"])
+            self.assertNotIn("DEMO-003", [item["id"] for item in report["managed_plans"]])
+            inactive = cli(verifier, "show", "DEMO-003", succeeds=False)
+            self.assertIn("DEMO-003' is not valid managed state", inactive.stderr)
+
+            dry_run = __import__("json").loads(cli(verifier, "repair", "--json").stdout)
+            self.assertIn("automatic-safe", {item["classification"] for item in dry_run["proposals"]})
+            self.assertEqual(before_scan, normalized_snapshot(verifier))
+            handoff = __import__("json").loads(cli(verifier, "repair", "--llm", "--json").stdout)
+            self.assertTrue(handoff["review_required"])
+            self.assertFalse(handoff["may_apply"])
+            refused = cli(verifier, "repair", "--apply", "--json", succeeds=False)
+            self.assertIn("refusing --apply", refused.stderr)
+            self.assertEqual(before_scan, normalized_snapshot(verifier))
+
+            # Emulate an explicitly approved host patch: remove the ambiguous input,
+            # normalize semantic content, and register only reviewed managed plans.
+            (verifier / "private-hub" / "ambiguous.md").unlink()
+            (verifier / "plan-hub" / "draft.md").unlink()
+            external = verifier / "initialized-hub" / "planning--DEMO-003--external.md"
+            reviewed = verifier / "demo-project" / external.name
+            external.replace(reviewed)
+            orchestration = verifier / "ORCHESTRATION.md"
+            orchestration.write_text(
+                orchestration.read_text(encoding="utf-8").replace(
+                    "## Retired plan IDs",
+                    "| `DEMO-003` | `demo-project` | — | — | — |\n\n## Retired plan IDs",
+                ),
+                encoding="utf-8",
+            )
+
+            # With semantic issues reviewed, deterministic repair may normalize a slug.
+            applied = __import__("json").loads(cli(verifier, "repair", "--apply", "--json").stdout)
+            self.assertTrue(applied["applied"])
+            normalized = verifier / "private-hub" / "planning--DEMO-002--sample-plan.md"
+            self.assertTrue(normalized.is_file())
+
+            # Registration and project placement remain a second explicit approval.
+            destination = verifier / "demo-project" / normalized.name
+            normalized.replace(destination)
+            orchestration.write_text(
+                orchestration.read_text(encoding="utf-8").replace(
+                    "| `DEMO-003` | `demo-project` | — | — | — |",
+                    "| `DEMO-002` | `demo-project` | — | — | — |\n"
+                    "| `DEMO-003` | `demo-project` | — | — | — |",
+                ),
+                encoding="utf-8",
+            )
+            clean = __import__("json").loads(cli(verifier, "scan", "--json").stdout)
+            self.assertTrue(clean["clean"], clean["diagnostics"])
+            self.assertEqual(["DEMO-001", "DEMO-002", "DEMO-003"],
+                             [item["id"] for item in clean["managed_plans"]])
+            cli(verifier, "validate")
+
+    def test_scan_inventories_unmanaged_input_without_activating_it(self) -> None:
+        self.run_cli("allocate", "DEMO", "managed")
+        self.run_cli("status", "DEMO-001", "ready")
+        raw = self.root / "demo-project" / "idea from another tool.md"
+        raw.write_text("# Idea\n\nThis is deliberately not a managed plan.\n", encoding="utf-8")
+
+        scan = self.run_cli("scan", "--json")
+        payload = __import__("json").loads(scan.stdout)
+
+        self.assertEqual(["DEMO-001"], [plan["id"] for plan in payload["managed_plans"]])
+        self.assertEqual("demo-project/idea from another tool.md", payload["unmanaged_files"][0]["path"])
+        self.assertEqual("unmanaged-plan-file", payload["diagnostics"][0]["code"])
+        self.run_cli("ready", "DEMO-001")
+
+    def test_scan_reports_invalid_project_folder_names(self) -> None:
+        self.run_cli("allocate", "DEMO", "managed")
+        invalid_project = self.root / "Bad Project"
+        invalid_project.mkdir()
+        (invalid_project / "draft.md").write_text(
+            "# Raw input\n\nID: DEMO-999\nStatus: planning\n", encoding="utf-8"
+        )
+
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertIn("Bad Project", payload["projects"])
+        self.assertEqual(["DEMO-001"], [plan["id"] for plan in payload["managed_plans"]])
+        naming = [item for item in payload["diagnostics"] if item["code"] == "invalid-project-folder"]
+        self.assertEqual(1, len(naming))
+        self.assertEqual("Bad Project", naming[0]["path"])
+        self.assertIn("lowercase kebab-case", naming[0]["message"])
+        self.assertFalse(payload["clean"])
+
+    def test_unregistered_valid_shaped_input_is_inactive_for_policy_operations(self) -> None:
+        self.run_cli("allocate", "DEMO", "managed")
+        self.run_cli("status", "DEMO-001", "ready")
+        raw = self.root / "demo-project" / "planning--DEMO-999--sample-plan.md"
+        raw.write_text("# External draft\n\nID: DEMO-999\nStatus: planning\n", encoding="utf-8")
+
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertEqual(["DEMO-001"], [plan["id"] for plan in payload["managed_plans"]])
+        self.assertIn("unregistered-plan-file", {item["code"] for item in payload["diagnostics"]})
+        self.run_cli("ready", "DEMO-001")
+        self.run_cli("claim", "DEMO-001", "test-agent")
+        allocated = self.run_cli("allocate", "DEMO", "first-plan")
+        self.assertIn("DEMO-002", allocated.stdout)
+
+    def test_ambiguous_unmanaged_id_blocks_only_policy_operations(self) -> None:
+        self.run_cli("allocate", "DEMO", "managed")
+        self.run_cli("status", "DEMO-001", "ready")
+        raw = self.root / "demo-project" / "draft.md"
+        raw.write_text("# Duplicate\n\nID: DEMO-001\nStatus: ready\n", encoding="utf-8")
+
+        scan = self.run_cli("scan", "--json")
+        payload = __import__("json").loads(scan.stdout)
+        self.assertIn("ambiguous-plan-id", {item["code"] for item in payload["diagnostics"]})
+        blocked = self.run_cli("ready", "DEMO-001", succeeds=False)
+        self.assertIn("ambiguous unmanaged input", blocked.stderr)
+
+    def test_every_raw_id_field_participates_in_active_id_ambiguity(self) -> None:
+        self.run_cli("allocate", "DEMO", "managed")
+        self.run_cli("status", "DEMO-001", "ready")
+        raw = self.root / "demo-project" / "draft.md"
+        raw.write_text(
+            "# Conflicting IDs\n\nID: DEMO-999\nID: DEMO-001\nStatus: ready\n",
+            encoding="utf-8",
+        )
+
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        ambiguity = [item for item in payload["diagnostics"] if item["code"] == "ambiguous-plan-id"]
+        self.assertIn("DEMO-001", {item["plan_id"] for item in ambiguity})
+        blocked = self.run_cli("ready", "DEMO-001", succeeds=False)
+        self.assertIn("ambiguous unmanaged input", blocked.stderr)
+
+    def test_scan_excludes_invalid_dependency_cycle_claim_findings_and_stale_rows(self) -> None:
+        self.run_cli("allocate", "DEMO", "first")
+        self.run_cli("allocate", "DEMO", "second")
+        orchestration = self.root / "ORCHESTRATION.md"
+
+        # A missing dependency invalidates its owner but not an unrelated plan.
+        text = orchestration.read_text(encoding="utf-8").replace(
+            "| `DEMO-001` | `demo-project` | — | — | — |",
+            "| `DEMO-001` | `demo-project` | `DEMO-999` | — | — |",
+        )
+        orchestration.write_text(text, encoding="utf-8")
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertEqual(["DEMO-002"], [plan["id"] for plan in payload["managed_plans"]])
+        self.assertIn("missing-dependency", {item["code"] for item in payload["diagnostics"]})
+
+        # A dependency cycle invalidates every participant.
+        text = text.replace("`DEMO-999`", "`DEMO-002`").replace(
+            "| `DEMO-002` | `demo-project` | — | — | — |",
+            "| `DEMO-002` | `demo-project` | `DEMO-001` | — | — |",
+        )
+        orchestration.write_text(text, encoding="utf-8")
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertEqual([], payload["managed_plans"])
+        self.assertIn("dependency-cycle", {item["code"] for item in payload["diagnostics"]})
+
+        # Invalid claims and findings lifecycle state exclude the affected plans.
+        impossible = "2026" + "-99" + "-99T99:99:99Z"
+        text = text.replace("`DEMO-002` | — | — |", f"— | `agent` | `{impossible}` |", 1)
+        text = text.replace("| `DEMO-002` | `demo-project` | `DEMO-001` | — | — |",
+                            "| `DEMO-002` | `demo-project` | — | — | — |")
+        orchestration.write_text(text, encoding="utf-8")
+        findings = self.root / "demo-project" / "findings" / "DEMO-002"
+        findings.mkdir(parents=True)
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertEqual([], payload["managed_plans"])
+        codes = {item["code"] for item in payload["diagnostics"]}
+        self.assertIn("invalid-claim", codes)
+        self.assertIn("findings-lifecycle", codes)
+
+        # A stale row is diagnosed but never represented as a managed plan.
+        orchestration.write_text(
+            orchestration.read_text(encoding="utf-8").replace(
+                "## Retired plan IDs",
+                "| `DEMO-003` | `demo-project` | — | — | — |\n\n## Retired plan IDs",
+            ),
+            encoding="utf-8",
+        )
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertNotIn("DEMO-003", [plan["id"] for plan in payload["managed_plans"]])
+        self.assertIn("stale-orchestration-row", {item["code"] for item in payload["diagnostics"]})
+
+    def test_wrong_project_findings_exclude_plan_from_managed_state(self) -> None:
+        self.run_cli("allocate", "DEMO", "managed")
+        misplaced = self.root / "plan-hub" / "findings" / "DEMO-001"
+        misplaced.mkdir(parents=True)
+
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        lifecycle = [
+            item for item in payload["diagnostics"]
+            if item["code"] == "findings-lifecycle"
+        ]
+        self.assertEqual(1, len(lifecycle))
+        self.assertIn("under wrong project", lifecycle[0]["message"])
+        self.assertEqual([], payload["managed_plans"])
+        blocked = self.run_cli("show", "DEMO-001", succeeds=False)
+        self.assertIn("Findings directory is under wrong project", blocked.stderr)
+
+    def test_registered_invalid_plan_does_not_block_unrelated_policy_operations(self) -> None:
+        self.run_cli("allocate", "DEMO", "valid")
+        self.run_cli("allocate", "DEMO", "invalid")
+        orchestration = self.root / "ORCHESTRATION.md"
+        orchestration.write_text(
+            orchestration.read_text(encoding="utf-8").replace(
+                "| `DEMO-002` | `demo-project` | — | — | — |",
+                "| `DEMO-002` | `demo-project` | `DEMO-999` | — | — |",
+            ),
+            encoding="utf-8",
+        )
+
+        self.run_cli("depends", "DEMO-001")
+        self.run_cli("status", "DEMO-001", "ready")
+        self.run_cli("ready", "DEMO-001")
+        self.run_cli("claim", "DEMO-001", "test-agent")
+        allocated = self.run_cli("allocate", "DEMO", "next")
+        self.assertIn("DEMO-003", allocated.stdout)
+        invalid = self.run_cli("ready", "DEMO-002", succeeds=False)
+        self.assertIn("unresolved dependency", invalid.stderr)
+
+    def test_duplicate_raw_ids_are_diagnosed_as_ambiguous(self) -> None:
+        project = self.root / "demo-project"
+        project.mkdir()
+        for name in ("first", "second"):
+            (project / f"planning--DEMO-999--{name}.md").write_text(
+                f"# {name}\n\nID: DEMO-999\nStatus: planning\n", encoding="utf-8"
+            )
+
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        ambiguity = [item for item in payload["diagnostics"] if item["code"] == "ambiguous-plan-id"]
+        self.assertEqual(["DEMO-999"], [item["plan_id"] for item in ambiguity])
+
+    def test_registered_plan_requires_exactly_one_id_and_status_field(self) -> None:
+        self.run_cli("allocate", "DEMO", "metadata")
+        plan = self.root / "demo-project" / "planning--DEMO-001--metadata.md"
+        original = plan.read_text(encoding="utf-8")
+        duplicate_fields = (
+            ("ID: DEMO-999\n", "metadata-id-mismatch"),
+            ("Status: ready\n", "lifecycle-mismatch"),
+        )
+        for extra, code in duplicate_fields:
+            with self.subTest(extra=extra):
+                plan.write_text(original + extra, encoding="utf-8")
+                payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+                self.assertEqual([], payload["managed_plans"])
+                self.assertIn(code, {item["code"] for item in payload["diagnostics"]})
+                blocked = self.run_cli("show", "DEMO-001", succeeds=False)
+                self.assertIn("exactly one matching", blocked.stderr)
+        plan.write_text(original, encoding="utf-8")
+
+    def test_metadata_invalid_registered_plan_does_not_block_unrelated_policy(self) -> None:
+        self.run_cli("allocate", "DEMO", "valid")
+        self.run_cli("allocate", "DEMO", "invalid")
+        self.run_cli("status", "DEMO-001", "ready")
+        invalid = self.root / "demo-project" / "planning--DEMO-002--invalid.md"
+        invalid.write_text(
+            invalid.read_text(encoding="utf-8") + "ID: DEMO-999\nStatus: ready\n",
+            encoding="utf-8",
+        )
+
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertEqual(["DEMO-001"], [plan["id"] for plan in payload["managed_plans"]])
+        self.assertNotIn("ambiguous-plan-id", {item["code"] for item in payload["diagnostics"]})
+        self.run_cli("ready", "DEMO-001")
+        self.run_cli("claim", "DEMO-001", "test-agent")
+        allocated = self.run_cli("allocate", "DEMO", "next")
+        self.assertIn("DEMO-003", allocated.stdout)
+        blocked = self.run_cli("show", "DEMO-002", succeeds=False)
+        self.assertIn("exactly one matching", blocked.stderr)
+
+    def test_validate_rejects_impossible_utc_claim_timestamps(self) -> None:
+        self.run_cli("allocate", "DEMO", "claimed")
+        self.run_cli("status", "DEMO-001", "ready")
+        orchestration = self.root / "ORCHESTRATION.md"
+        baseline = orchestration.read_text(encoding="utf-8")
+        timestamps = ("2026" + "-02" + "-30T12:00:00Z", "2026" + "-12" + "-01T24:00:00Z")
+        for timestamp in timestamps:
+            with self.subTest(timestamp=timestamp):
+                orchestration.write_text(
+                    baseline.replace("| `DEMO-001` | `demo-project` | — | — | — |",
+                                     f"| `DEMO-001` | `demo-project` | — | `agent` | `{timestamp}` |"),
+                    encoding="utf-8",
+                )
+                rejected = self.run_cli("validate", succeeds=False)
+                self.assertIn("invalid claim timestamp", rejected.stderr)
+
+    def test_repair_refuses_repeated_or_conflicting_id_and_status_metadata(self) -> None:
+        project = self.root / "demo-project"
+        project.mkdir()
+        source = project / "planning--DEMO-999--Sample Plan.md"
+        cases = (
+            ("ID: DEMO-999\nID: DEMO-999\nStatus: planning\n", "metadata-id-mismatch"),
+            ("ID: DEMO-999\nID: DEMO-998\nStatus: planning\n", "metadata-id-mismatch"),
+            ("ID: DEMO-999\nStatus: planning\nStatus: planning\n", "lifecycle-mismatch"),
+            ("ID: DEMO-999\nStatus: planning\nStatus: ready\n", "lifecycle-mismatch"),
+        )
+        for metadata, expected_code in cases:
+            with self.subTest(metadata=metadata):
+                source.write_text("# Sample plan\n\n" + metadata, encoding="utf-8")
+                payload = __import__("json").loads(self.run_cli("repair", "--json").stdout)
+                self.assertNotIn("automatic-safe", {item["classification"] for item in payload["proposals"]})
+                self.assertIn(expected_code, {item.get("diagnostic_code") for item in payload["proposals"]})
+                refused = self.run_cli("repair", "--apply", "--json", succeeds=False)
+                self.assertIn("refusing --apply", refused.stderr)
+                self.assertTrue(source.exists())
+                self.assertFalse((project / "planning--DEMO-999--sample-plan.md").exists())
+
+    def test_repair_is_dry_run_and_llm_handoff_never_mutates(self) -> None:
+        project = self.root / "demo-project"
+        project.mkdir()
+        source = project / "planning--DEMO-001--Sample Plan.md"
+        source.write_text("# Sample plan\n\nID: DEMO-001\nStatus: planning\n", encoding="utf-8")
+        original_orchestration = (self.root / "ORCHESTRATION.md").read_text(encoding="utf-8")
+
+        dry_run = self.run_cli("repair", "--json")
+        payload = __import__("json").loads(dry_run.stdout)
+        self.assertEqual("automatic-safe", payload["proposals"][0]["classification"])
+        self.assertTrue(source.exists())
+        self.assertFalse((project / "planning--DEMO-001--sample-plan.md").exists())
+
+        llm = self.run_cli("repair", "--llm", "--json")
+        handoff = __import__("json").loads(llm.stdout)
+        self.assertTrue(handoff["review_required"])
+        self.assertFalse(handoff["may_commit_or_push"])
+        self.assertTrue(source.exists())
+
+        applied = self.run_cli("repair", "--apply", "--json")
+        self.assertIn('"applied": true', applied.stdout)
+        self.assertFalse(source.exists())
+        self.assertTrue((project / "planning--DEMO-001--sample-plan.md").exists())
+        self.assertEqual(original_orchestration, (self.root / "ORCHESTRATION.md").read_text(encoding="utf-8"))
+        scan = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertEqual([], scan["managed_plans"])
+
 
 if __name__ == "__main__":
     unittest.main()
