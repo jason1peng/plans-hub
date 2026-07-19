@@ -95,9 +95,15 @@ def commit_metadata(root: Path, revision: str) -> str:
     return result.stdout
 
 
-def scan_text(text: str, label: str, errors: list[str], forbidden_fragments: list[str]) -> None:
+def scan_sensitive_text(text: str, label: str, errors: list[str], forbidden_fragments: list[str]) -> None:
     if CREDENTIAL_URL.search(text):
         errors.append(f"{label}: credential-bearing URL")
+    for fragment in forbidden_fragments:
+        if fragment and fragment in text:
+            errors.append(f"{label}: forbidden private fragment: {fragment!r}")
+
+
+def scan_project_markers(text: str, label: str, errors: list[str]) -> None:
     for match in PLAN_IDENTIFIER.finditer(text):
         if match.group(1) not in SYNTHETIC_PLAN_PREFIXES:
             errors.append(f"{label}: non-synthetic plan identifier: {match.group(0)!r}")
@@ -107,9 +113,20 @@ def scan_text(text: str, label: str, errors: list[str], forbidden_fragments: lis
     for match in KEBAB_MARKER.finditer(text):
         if match.group(1) not in ALLOWED_KEBAB_MARKERS:
             errors.append(f"{label}: unapproved project-like marker: {match.group(0)!r}")
-    for fragment in forbidden_fragments:
-        if fragment and fragment in text:
-            errors.append(f"{label}: forbidden private fragment: {fragment!r}")
+
+
+def scan_text(text: str, label: str, errors: list[str], forbidden_fragments: list[str]) -> None:
+    scan_sensitive_text(text, label, errors, forbidden_fragments)
+    scan_project_markers(text, label, errors)
+
+
+def scan_commit_metadata(text: str, label: str, errors: list[str], forbidden_fragments: list[str]) -> None:
+    # Author/committer identities are untrusted metadata, not project content. Continue to
+    # audit all metadata for credentials and explicit private fragments, but apply generic
+    # project marker heuristics only to the commit message after the header separator.
+    _, separator, message = text.partition("\n\n")
+    scan_sensitive_text(text, label, errors, forbidden_fragments)
+    scan_project_markers(message if separator else "", f"{label} message", errors)
 
 
 def main() -> int:
@@ -135,7 +152,7 @@ def main() -> int:
             text = content_at(root, path, revision).decode("utf-8", errors="ignore")
             scan_text(text, f"{label}: {path}", errors, args.forbid)
         if args.history and isinstance(revision, str) and revision != "working tree":
-            scan_text(commit_metadata(root, revision), f"{label}: commit metadata", errors, args.forbid)
+            scan_commit_metadata(commit_metadata(root, revision), f"{label}: commit metadata", errors, args.forbid)
 
     if errors:
         print("Public release guard failed:", file=sys.stderr)

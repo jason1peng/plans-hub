@@ -15,6 +15,7 @@ ID_RE = re.compile(r"^([A-Z][A-Z0-9]*)-([0-9]{3,})$")
 PROJECT_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 EMPTY_VALUES = {"", "—", "-", "none"}
 RESERVED_DIRS = {"scripts", "skills"}
+STALE_PRIVATE_CLIENT_PATH = "scripts/planctl.py"
 
 
 def clean_cell(value: str) -> str:
@@ -206,7 +207,14 @@ def validate(root: Path) -> list[str]:
         if not (root / required).is_file():
             errors.append(f"Missing {required}")
 
-    prefixes, entries, retired = parse_registry(root / "ORCHESTRATION.md", errors)
+    orchestration_path = root / "ORCHESTRATION.md"
+    if orchestration_path.is_file() and STALE_PRIVATE_CLIENT_PATH in orchestration_path.read_text(encoding="utf-8"):
+        errors.append(
+            "ORCHESTRATION.md references removed private client path 'scripts/planctl.py'; "
+            "use the installed planctl wrapper"
+        )
+
+    prefixes, entries, retired = parse_registry(orchestration_path, errors)
     plans = find_plans(root, errors)
 
     for plan_id, plan in plans.items():

@@ -16,8 +16,8 @@ class PublicReleaseGuardTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.git("init", "-q")
-        self.git("config", "user.email", "test@example.invalid")
-        self.git("config", "user.name", "Test")
+        self.git("config", "user.email", "demo" + "-user@example.invalid")
+        self.git("config", "user.name", "demo" + "-user")
         (self.root / "README.md").write_text("# Synthetic public client\n", encoding="utf-8")
         self.git("add", "README.md")
         self.git("commit", "-qm", "initial")
@@ -33,9 +33,9 @@ class PublicReleaseGuardTest(unittest.TestCase):
             check=True,
         )
 
-    def guard(self) -> subprocess.CompletedProcess[str]:
+    def guard(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["python3", str(GUARD), "--root", str(self.root), "--history"],
+            ["python3", str(GUARD), "--root", str(self.root), "--history", *arguments],
             text=True,
             capture_output=True,
             check=False,
@@ -94,14 +94,30 @@ class PublicReleaseGuardTest(unittest.TestCase):
         self.assertIn("working tree: untracked-secret.txt: credential-bearing URL", result.stderr)
         self.assertIn("working tree: unexpected top-level path: ignored-secret.txt", result.stderr)
 
-    def test_rejects_private_identifier_in_reachable_commit_metadata(self) -> None:
+    def test_allows_hyphenated_author_identity(self) -> None:
+        result = self.guard()
+
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_still_rejects_forbidden_fragment_in_author_identity(self) -> None:
+        private_fragment = "author" + "-secret"
+        self.git("config", "user.name", private_fragment)
+        self.git("commit", "--allow-empty", "-qm", "safe metadata check")
+
+        result = self.guard("--forbid", private_fragment)
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("commit metadata: forbidden private fragment", result.stderr)
+        self.assertIn(private_fragment, result.stderr)
+
+    def test_rejects_private_identifier_in_reachable_commit_message(self) -> None:
         private_identifier = "ACME" + "-999"
         self.git("commit", "--allow-empty", "-qm", f"mentions {private_identifier}")
 
         result = self.guard()
 
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("commit metadata: non-synthetic plan identifier", result.stderr)
+        self.assertIn("commit metadata message: non-synthetic plan identifier", result.stderr)
         self.assertIn(private_identifier, result.stderr)
 
     def test_rejects_non_synthetic_identifier_without_forbid_option(self) -> None:

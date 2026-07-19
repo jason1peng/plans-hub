@@ -61,6 +61,19 @@ class PlanctlTest(unittest.TestCase):
             self.fail(f"command unexpectedly passed: {arguments}\nstdout={result.stdout}")
         return result
 
+    def test_validate_rejects_removed_private_client_path_in_orchestration(self) -> None:
+        orchestration = self.root / "ORCHESTRATION.md"
+        orchestration.write_text(
+            orchestration.read_text(encoding="utf-8")
+            + "\nRun `scripts/" + "planctl.py validate` after every change.\n",
+            encoding="utf-8",
+        )
+
+        result = self.run_cli("validate", succeeds=False)
+
+        self.assertIn("references removed private client path", result.stderr)
+        self.assertIn("use the installed planctl wrapper", result.stderr)
+
     def test_root_is_required_and_explicit_root_overrides_environment(self) -> None:
         environment = os.environ.copy()
         environment.pop("PLANS_ROOT", None)
