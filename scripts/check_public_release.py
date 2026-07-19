@@ -33,19 +33,26 @@ PRIVATE_PROJECT_PREFIXES = {
 STANDALONE_UPPERCASE = re.compile(r"(?<![A-Z0-9_])([A-Z][A-Z0-9]{2,})(?![A-Z0-9_])")
 KEBAB_MARKER = re.compile(r"(?<![a-z0-9])([a-z0-9]+(?:-[a-z0-9]+)+)(?![a-z0-9])")
 ALLOWED_KEBAB_MARKERS = {
-    "0-9", "a-z0-9", "after-retired", "agent-name", "caller-supplied", "ci-plan",
+    "0-9", "a-z0-9", "after-retired", "agent-name", "allow-empty", "caller-supplied", "cat-file", "ci-plan",
     "completed-agent", "completed-dependency", "credential-bearing", "cycle-peer", "demo-001",
     "demo-project", "dependency-agent", "downstream-agent", "fast-forward", "fetch-depth", "ff-only",
-    "first-plan", "force-push", "git-common-dir", "initialized-hub", "install-skill", "kebab-case",
+    "first-plan", "force-push", "git-common-dir", "ignored-secret", "initialized-hub", "install-skill", "kebab-case",
     "line-length", "list-ready", "low-contention", "ls-files", "ls-tree", "name-only", "non-empty",
     "non-synthetic", "pi-subagents", "plan-hub", "plan-state", "plan-status", "plans-hub",
     "post-migration", "private-hub", "project-like", "python-version", "re-evaluate", "re-run", "rev-list", "rev-parse",
     "runs-on", "sample-plan", "setup-python", "shared-plan", "shared-plan-storage", "test-agent",
-    "top-level", "ubuntu-latest", "unknown-skill", "upstream-agent", "utf-8", "with-claude",
+    "top-level", "ubuntu-latest", "unknown-skill", "untracked-secret", "upstream-agent", "utf-8", "with-claude",
+    "working-tree",
 }
 
 
-def tracked_files(root: Path, revision: str | None = None) -> list[str]:
+def snapshot_files(root: Path, revision: str | None = None) -> list[str]:
+    if revision == "working tree":
+        return sorted(
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file() and ".git" not in path.relative_to(root).parts
+        )
     command = ["git", "-C", str(root)]
     command += ["ls-tree", "-r", "--name-only", revision] if revision else ["ls-files"]
     result = subprocess.run(command, text=True, capture_output=True, check=True)
@@ -78,6 +85,33 @@ def revisions(root: Path, include_history: bool) -> list[str | None]:
     return [*snapshots, *result.stdout.splitlines()]
 
 
+def commit_metadata(root: Path, revision: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "commit", revision],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return result.stdout
+
+
+def scan_text(text: str, label: str, errors: list[str], forbidden_fragments: list[str]) -> None:
+    if CREDENTIAL_URL.search(text):
+        errors.append(f"{label}: credential-bearing URL")
+    for match in PLAN_IDENTIFIER.finditer(text):
+        if match.group(1) not in SYNTHETIC_PLAN_PREFIXES:
+            errors.append(f"{label}: non-synthetic plan identifier: {match.group(0)!r}")
+    for match in STANDALONE_UPPERCASE.finditer(text):
+        if match.group(1) in PRIVATE_PROJECT_PREFIXES:
+            errors.append(f"{label}: private project prefix: {match.group(0)!r}")
+    for match in KEBAB_MARKER.finditer(text):
+        if match.group(1) not in ALLOWED_KEBAB_MARKERS:
+            errors.append(f"{label}: unapproved project-like marker: {match.group(0)!r}")
+    for fragment in forbidden_fragments:
+        if fragment and fragment in text:
+            errors.append(f"{label}: forbidden private fragment: {fragment!r}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
@@ -89,8 +123,8 @@ def main() -> int:
 
     for revision in revisions(root, args.history):
         label = revision or "index"
-        tree_revision = None if revision == "working tree" else revision
-        for path in tracked_files(root, tree_revision):
+        tree_revision = revision if revision == "working tree" else revision
+        for path in snapshot_files(root, tree_revision):
             top = path.split("/", 1)[0]
             if top not in ALLOWED_TOP_LEVEL:
                 errors.append(f"{label}: unexpected top-level path: {path}")
@@ -98,22 +132,10 @@ def main() -> int:
                 errors.append(f"{label}: private plan-state path: {path}")
             if GENERATED_PATH.search(path):
                 errors.append(f"{label}: generated path: {path}")
-            data = content_at(root, path, revision)
-            text = data.decode("utf-8", errors="ignore")
-            if CREDENTIAL_URL.search(text):
-                errors.append(f"{label}: credential-bearing URL in {path}")
-            for match in PLAN_IDENTIFIER.finditer(text):
-                if match.group(1) not in SYNTHETIC_PLAN_PREFIXES:
-                    errors.append(f"{label}: non-synthetic plan identifier in {path}: {match.group(0)!r}")
-            for match in STANDALONE_UPPERCASE.finditer(text):
-                if match.group(1) in PRIVATE_PROJECT_PREFIXES:
-                    errors.append(f"{label}: private project prefix in {path}: {match.group(0)!r}")
-            for match in KEBAB_MARKER.finditer(text):
-                if match.group(1) not in ALLOWED_KEBAB_MARKERS:
-                    errors.append(f"{label}: unapproved project-like marker in {path}: {match.group(0)!r}")
-            for fragment in args.forbid:
-                if fragment and fragment in text:
-                    errors.append(f"{label}: forbidden private fragment in {path}: {fragment!r}")
+            text = content_at(root, path, revision).decode("utf-8", errors="ignore")
+            scan_text(text, f"{label}: {path}", errors, args.forbid)
+        if args.history and isinstance(revision, str) and revision != "working tree":
+            scan_text(commit_metadata(root, revision), f"{label}: commit metadata", errors, args.forbid)
 
     if errors:
         print("Public release guard failed:", file=sys.stderr)

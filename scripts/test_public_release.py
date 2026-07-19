@@ -51,7 +51,7 @@ class PublicReleaseGuardTest(unittest.TestCase):
         result = self.guard()
 
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("index: credential-bearing URL in README.md", result.stderr)
+        self.assertIn("index: README.md: credential-bearing URL", result.stderr)
 
     def test_scans_unsafe_worktree_copy_when_index_is_safe(self) -> None:
         readme = self.root / "README.md"
@@ -61,8 +61,8 @@ class PublicReleaseGuardTest(unittest.TestCase):
         result = self.guard()
 
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("working tree: credential-bearing URL in README.md", result.stderr)
-        self.assertNotIn("index: credential-bearing URL in README.md", result.stderr)
+        self.assertIn("working tree: README.md: credential-bearing URL", result.stderr)
+        self.assertNotIn("index: README.md: credential-bearing URL", result.stderr)
 
     def test_scans_unsafe_history_when_index_and_worktree_are_safe(self) -> None:
         readme = self.root / "README.md"
@@ -77,9 +77,32 @@ class PublicReleaseGuardTest(unittest.TestCase):
         result = self.guard()
 
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("credential-bearing URL in README.md", result.stderr)
-        self.assertNotIn("working tree: credential-bearing URL", result.stderr)
-        self.assertNotIn("index: credential-bearing URL", result.stderr)
+        self.assertIn("README.md: credential-bearing URL", result.stderr)
+        self.assertNotIn("working tree: README.md: credential-bearing URL", result.stderr)
+        self.assertNotIn("index: README.md: credential-bearing URL", result.stderr)
+
+    def test_rejects_untracked_and_ignored_worktree_files(self) -> None:
+        credential_url = "https://user" + ":secret@example.invalid/private\n"
+        (self.root / "untracked-secret.txt").write_text(credential_url, encoding="utf-8")
+        (self.root / ".gitignore").write_text("ignored-secret.txt\n", encoding="utf-8")
+        (self.root / "ignored-secret.txt").write_text("private data\n", encoding="utf-8")
+
+        result = self.guard()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("working tree: unexpected top-level path: untracked-secret.txt", result.stderr)
+        self.assertIn("working tree: untracked-secret.txt: credential-bearing URL", result.stderr)
+        self.assertIn("working tree: unexpected top-level path: ignored-secret.txt", result.stderr)
+
+    def test_rejects_private_identifier_in_reachable_commit_metadata(self) -> None:
+        private_identifier = "ACME" + "-999"
+        self.git("commit", "--allow-empty", "-qm", f"mentions {private_identifier}")
+
+        result = self.guard()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("commit metadata: non-synthetic plan identifier", result.stderr)
+        self.assertIn(private_identifier, result.stderr)
 
     def test_rejects_non_synthetic_identifier_without_forbid_option(self) -> None:
         private_identifier = "ACME" + "-999"
@@ -89,7 +112,7 @@ class PublicReleaseGuardTest(unittest.TestCase):
         result = self.guard()
 
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("index: non-synthetic plan identifier", result.stderr)
+        self.assertIn("index: README.md: non-synthetic plan identifier", result.stderr)
         self.assertIn(private_identifier, result.stderr)
 
     def test_rejects_standalone_private_project_prefix(self) -> None:
@@ -100,7 +123,7 @@ class PublicReleaseGuardTest(unittest.TestCase):
         result = self.guard()
 
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("index: private project prefix", result.stderr)
+        self.assertIn("index: README.md: private project prefix", result.stderr)
         self.assertIn(private_prefix, result.stderr)
 
     def test_rejects_unapproved_project_marker_without_forbid_option(self) -> None:
@@ -111,7 +134,7 @@ class PublicReleaseGuardTest(unittest.TestCase):
         result = self.guard()
 
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("index: unapproved project-like marker", result.stderr)
+        self.assertIn("index: README.md: unapproved project-like marker", result.stderr)
         self.assertIn(private_project, result.stderr)
 
 

@@ -17,8 +17,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
-      - run: python3 -m compileall -q scripts
+      - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py'
+      - run: PYTHONPYCACHEPREFIX="$(mktemp -d)" python3 -m compileall -q scripts
       - run: python3 scripts/check_public_release.py --history
       - name: Bootstrap and validate a synthetic external hub
         run: |

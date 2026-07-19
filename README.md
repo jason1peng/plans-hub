@@ -45,16 +45,25 @@ git -C "$PLANS_ROOT" commit -m 'plans(DEMO-001): claim'
 git -C "$PLANS_ROOT" push origin main       # never force
 ```
 
-If the push is rejected, fetch and fast-forward again, then re-run `show`/`ready` and inspect the current claim and dependencies. Do not blindly replay the rejected claim and never force-push shared state. Concurrent allocation and claims across clones require manual coordination in this release.
+If the push is rejected because the remote advanced, do not try another fast-forward merge: the rejected local claim commit and remote branch have already diverged. Confirm the rejected claim commit is the unpublished `HEAD` and the worktree has no unrelated changes, then discard only that rejected commit and re-evaluate the remote state:
+
+```sh
+git -C "$PLANS_ROOT" fetch origin
+git -C "$PLANS_ROOT" reset --keep origin/main
+scripts/planctl.py --root "$PLANS_ROOT" show DEMO-001
+scripts/planctl.py --root "$PLANS_ROOT" ready DEMO-001
+```
+
+Inspect the current claim and dependencies before deciding whether to make a new claim. If `reset --keep` refuses because of local changes, stop and preserve/reconcile them manually; do not use `--hard`, blindly replay the rejected claim, or force-push shared state. Concurrent allocation and claims across clones require manual coordination in this release.
 
 ## Development and release checks
 
 ```sh
-python3 -m unittest discover -s scripts -p 'test_*.py'
-python3 -m compileall -q scripts
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_*.py'
+PYTHONPYCACHEPREFIX="$(mktemp -d)" python3 -m compileall -q scripts
 python3 scripts/check_public_release.py --history
 ```
 
-The release guard enforces an allowlisted tree and rejects plan-status files, findings, generated artifacts, credential-bearing URLs, real project prefixes, every non-`DEMO` plan identifier, unapproved project-like kebab-case markers, and caller-supplied private fragments across the working tree, index, and every reachable commit. Build releases only from fresh public history; never copy a private hub's `.git` directory or rewrite its history for publication.
+The release guard enforces an allowlisted tree and rejects plan-status files, findings, generated artifacts, credential-bearing URLs, real project prefixes, every non-`DEMO` plan identifier, unapproved project-like kebab-case markers, and caller-supplied private fragments across tracked, untracked, and ignored working-tree files, the index, reachable commit trees, and reachable commit metadata/messages. Build releases only from fresh public history; never copy a private hub's `.git` directory or rewrite its history for publication.
 
 Licensed under the MIT License.

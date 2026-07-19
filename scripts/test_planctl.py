@@ -214,6 +214,63 @@ class PlanctlTest(unittest.TestCase):
             self.assertEqual(0, shown.returncode, shown.stderr)
             self.assertIn("Claim: agent-name", shown.stdout)
 
+    def test_rejected_claim_recovery_discards_only_unpublished_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_name:
+            workspace = Path(workspace_name)
+            remote = workspace / "remote.git"
+            winner = workspace / "winner"
+            loser = workspace / "loser"
+            subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+            subprocess.run(["git", "clone", "-q", str(remote), str(winner)], check=True)
+            for checkout in (winner,):
+                subprocess.run(["git", "-C", str(checkout), "config", "user.email", "test@example.invalid"], check=True)
+                subprocess.run(["git", "-C", str(checkout), "config", "user.name", "Test"], check=True)
+            (winner / "ORCHESTRATION.md").write_text("unclaimed\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(winner), "add", "ORCHESTRATION.md"], check=True)
+            subprocess.run(["git", "-C", str(winner), "commit", "-qm", "initialize"], check=True)
+            subprocess.run(["git", "-C", str(winner), "branch", "-M", "main"], check=True)
+            subprocess.run(["git", "-C", str(winner), "push", "-q", "-u", "origin", "main"], check=True)
+            subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(loser)], check=True)
+            subprocess.run(["git", "-C", str(loser), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(loser), "config", "user.name", "Test"], check=True)
+
+            (winner / "ORCHESTRATION.md").write_text("winner claim\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(winner), "commit", "-qam", "winner claim"], check=True)
+            subprocess.run(["git", "-C", str(winner), "push", "-q", "origin", "main"], check=True)
+            (loser / "ORCHESTRATION.md").write_text("loser claim\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(loser), "commit", "-qam", "loser claim"], check=True)
+            rejected = subprocess.run(
+                ["git", "-C", str(loser), "push", "origin", "main"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(0, rejected.returncode)
+
+            subprocess.run(["git", "-C", str(loser), "fetch", "-q", "origin"], check=True)
+            impossible = subprocess.run(
+                ["git", "-C", str(loser), "merge", "--ff-only", "origin/main"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(0, impossible.returncode)
+            subprocess.run(["git", "-C", str(loser), "reset", "--keep", "origin/main"], check=True)
+            self.assertEqual("winner claim\n", (loser / "ORCHESTRATION.md").read_text(encoding="utf-8"))
+            self.assertEqual(
+                self.git_head(winner),
+                self.git_head(loser),
+            )
+
+    @staticmethod
+    def git_head(checkout: Path) -> str:
+        return subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
     def test_init_bootstraps_external_synthetic_hub(self) -> None:
         initialized = self.root / "initialized-hub"
         result = subprocess.run(
