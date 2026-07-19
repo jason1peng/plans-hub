@@ -454,6 +454,20 @@ class PlanctlTest(unittest.TestCase):
         self.assertEqual("unmanaged-plan-file", payload["diagnostics"][0]["code"])
         self.run_cli("ready", "DEMO-001")
 
+    def test_unregistered_valid_shaped_input_is_inactive_for_policy_operations(self) -> None:
+        self.run_cli("allocate", "DEMO", "managed")
+        self.run_cli("status", "DEMO-001", "ready")
+        raw = self.root / "demo-project" / "planning--DEMO-999--sample-plan.md"
+        raw.write_text("# External draft\n\nID: DEMO-999\nStatus: planning\n", encoding="utf-8")
+
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertEqual(["DEMO-001"], [plan["id"] for plan in payload["managed_plans"]])
+        self.assertIn("unregistered-plan-file", {item["code"] for item in payload["diagnostics"]})
+        self.run_cli("ready", "DEMO-001")
+        self.run_cli("claim", "DEMO-001", "test-agent")
+        allocated = self.run_cli("allocate", "DEMO", "first-plan")
+        self.assertIn("DEMO-002", allocated.stdout)
+
     def test_ambiguous_unmanaged_id_blocks_only_policy_operations(self) -> None:
         self.run_cli("allocate", "DEMO", "managed")
         self.run_cli("status", "DEMO-001", "ready")
@@ -465,6 +479,73 @@ class PlanctlTest(unittest.TestCase):
         self.assertIn("ambiguous-plan-id", {item["code"] for item in payload["diagnostics"]})
         blocked = self.run_cli("ready", "DEMO-001", succeeds=False)
         self.assertIn("ambiguous unmanaged input", blocked.stderr)
+
+    def test_scan_excludes_invalid_dependency_cycle_claim_findings_and_stale_rows(self) -> None:
+        self.run_cli("allocate", "DEMO", "first")
+        self.run_cli("allocate", "DEMO", "second")
+        orchestration = self.root / "ORCHESTRATION.md"
+
+        # A missing dependency invalidates its owner but not an unrelated plan.
+        text = orchestration.read_text(encoding="utf-8").replace(
+            "| `DEMO-001` | `demo-project` | — | — | — |",
+            "| `DEMO-001` | `demo-project` | `DEMO-999` | — | — |",
+        )
+        orchestration.write_text(text, encoding="utf-8")
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertEqual(["DEMO-002"], [plan["id"] for plan in payload["managed_plans"]])
+        self.assertIn("missing-dependency", {item["code"] for item in payload["diagnostics"]})
+
+        # A dependency cycle invalidates every participant.
+        text = text.replace("`DEMO-999`", "`DEMO-002`").replace(
+            "| `DEMO-002` | `demo-project` | — | — | — |",
+            "| `DEMO-002` | `demo-project` | `DEMO-001` | — | — |",
+        )
+        orchestration.write_text(text, encoding="utf-8")
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertEqual([], payload["managed_plans"])
+        self.assertIn("dependency-cycle", {item["code"] for item in payload["diagnostics"]})
+
+        # Invalid claims and findings lifecycle state exclude the affected plans.
+        impossible = "2026" + "-99" + "-99T99:99:99Z"
+        text = text.replace("`DEMO-002` | — | — |", f"— | `agent` | `{impossible}` |", 1)
+        text = text.replace("| `DEMO-002` | `demo-project` | `DEMO-001` | — | — |",
+                            "| `DEMO-002` | `demo-project` | — | — | — |")
+        orchestration.write_text(text, encoding="utf-8")
+        findings = self.root / "demo-project" / "findings" / "DEMO-002"
+        findings.mkdir(parents=True)
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertEqual([], payload["managed_plans"])
+        codes = {item["code"] for item in payload["diagnostics"]}
+        self.assertIn("invalid-claim", codes)
+        self.assertIn("findings-lifecycle", codes)
+
+        # A stale row is diagnosed but never represented as a managed plan.
+        orchestration.write_text(
+            orchestration.read_text(encoding="utf-8").replace(
+                "## Retired plan IDs",
+                "| `DEMO-003` | `demo-project` | — | — | — |\n\n## Retired plan IDs",
+            ),
+            encoding="utf-8",
+        )
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertNotIn("DEMO-003", [plan["id"] for plan in payload["managed_plans"]])
+        self.assertIn("stale-orchestration-row", {item["code"] for item in payload["diagnostics"]})
+
+    def test_validate_rejects_impossible_utc_claim_timestamps(self) -> None:
+        self.run_cli("allocate", "DEMO", "claimed")
+        self.run_cli("status", "DEMO-001", "ready")
+        orchestration = self.root / "ORCHESTRATION.md"
+        baseline = orchestration.read_text(encoding="utf-8")
+        timestamps = ("2026" + "-02" + "-30T12:00:00Z", "2026" + "-12" + "-01T24:00:00Z")
+        for timestamp in timestamps:
+            with self.subTest(timestamp=timestamp):
+                orchestration.write_text(
+                    baseline.replace("| `DEMO-001` | `demo-project` | — | — | — |",
+                                     f"| `DEMO-001` | `demo-project` | — | `agent` | `{timestamp}` |"),
+                    encoding="utf-8",
+                )
+                rejected = self.run_cli("validate", succeeds=False)
+                self.assertIn("invalid claim timestamp", rejected.stderr)
 
     def test_repair_is_dry_run_and_llm_handoff_never_mutates(self) -> None:
         project = self.root / "demo-project"

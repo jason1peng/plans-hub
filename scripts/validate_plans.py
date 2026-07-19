@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 STATUS_RE = re.compile(
@@ -105,50 +106,87 @@ def parse_registry(
     return prefixes, entries, retired
 
 
-def find_plans(root: Path, errors: list[str]) -> dict[str, dict[str, object]]:
-    plans: dict[str, dict[str, object]] = {}
+def find_plan_candidates(root: Path) -> dict[str, list[dict[str, object]]]:
+    """Return syntactically named candidates without activating raw input."""
+    candidates: dict[str, list[dict[str, object]]] = {}
     for project_dir in sorted(
         path
         for path in root.iterdir()
         if path.is_dir() and path.name not in RESERVED_DIRS and not path.name.startswith(".")
     ):
-        if not PROJECT_RE.fullmatch(project_dir.name):
-            errors.append(f"Invalid project folder name: {project_dir.name!r}")
         for plan_file in sorted(project_dir.glob("*.md")):
             match = STATUS_RE.fullmatch(plan_file.name)
             if not match:
-                # Arbitrary Markdown is passive datastore input. It is inventoried by
-                # scan(), but never enters managed orchestration state.
                 continue
             status, plan_id, plan_name = match.groups()
-            if plan_id in plans:
-                errors.append(
-                    f"Plan ID {plan_id!r} has multiple files: "
-                    f"{plans[plan_id]['path'].relative_to(root)} and {plan_file.relative_to(root)}"
-                )
-                continue
-            text = plan_file.read_text(encoding="utf-8")
-            if not re.search(rf"(?m)^ID:\s*{re.escape(plan_id)}\s*$", text):
-                errors.append(f"Plan {plan_id!r} has missing or inconsistent ID field")
-            if not re.search(rf"(?m)^Status:\s*{status}\s*$", text):
-                errors.append(f"Plan {plan_id!r} has missing or inconsistent Status field")
-            plans[plan_id] = {
+            candidates.setdefault(plan_id, []).append({
                 "status": status,
                 "project": project_dir.name,
                 "path": plan_file,
                 "name": plan_name,
-                "text": text,
-            }
+                "text": plan_file.read_text(encoding="utf-8"),
+            })
+    return candidates
+
+
+def find_plans(
+    root: Path,
+    errors: list[str],
+    prefixes: dict[str, str] | None = None,
+    entries: dict[str, dict[str, object]] | None = None,
+) -> dict[str, dict[str, object]]:
+    """Return only registered candidates that satisfy the base managed contract."""
+    if prefixes is None or entries is None:
+        prefixes, entries, _ = parse_registry(root / "ORCHESTRATION.md", errors)
+    plans: dict[str, dict[str, object]] = {}
+    for plan_id, matches in find_plan_candidates(root).items():
+        # Duplicate inactive inputs remain raw. A duplicate of a registered ID is
+        # active ambiguity and therefore invalidates that orchestration entry.
+        if len(matches) != 1:
+            if plan_id in entries:
+                paths = " and ".join(str(item["path"].relative_to(root)) for item in matches)
+                errors.append(f"Plan ID {plan_id!r} has multiple files: {paths}")
+            continue
+        plan = matches[0]
+        if plan_id not in entries:
+            continue
+        text = str(plan["text"])
+        valid = True
+        if not re.search(rf"(?m)^ID:\s*{re.escape(plan_id)}\s*$", text):
+            errors.append(f"Plan {plan_id!r} has missing or inconsistent ID field")
+            valid = False
+        if not re.search(rf"(?m)^Status:\s*{re.escape(str(plan['status']))}\s*$", text):
+            errors.append(f"Plan {plan_id!r} has missing or inconsistent Status field")
+            valid = False
+        match = ID_RE.fullmatch(plan_id)
+        expected_project = prefixes.get(match.group(1) if match else "")
+        if expected_project is None:
+            errors.append(f"Plan {plan_id!r} uses unregistered prefix")
+            valid = False
+        elif expected_project != plan["project"]:
+            errors.append(f"Plan {plan_id!r} belongs in {expected_project!r}, not {plan['project']!r}")
+            valid = False
+        if entries[plan_id]["project"] != plan["project"]:
+            errors.append(f"Orchestration project mismatch for {plan_id!r}")
+            valid = False
+        if valid:
+            plans[plan_id] = plan
     return plans
 
 
-def validate_findings(root: Path, plans: dict[str, dict[str, object]], errors: list[str]) -> None:
+def validate_findings(
+    root: Path,
+    plans: dict[str, dict[str, object]],
+    errors: list[str],
+    invalid_ids: set[str] | None = None,
+) -> None:
     for plan_id, plan in plans.items():
         findings_dir = root / str(plan["project"]) / "findings" / plan_id
         expected_link = f"findings/{plan_id}/README.md"
         has_link = bool(
             re.search(rf"\]\(\s*{re.escape(expected_link)}\s*\)", str(plan["text"]))
         )
+        plan_errors_before = len(errors)
         if findings_dir.exists():
             if not findings_dir.is_dir():
                 errors.append(f"Findings path is not a directory: {findings_dir.relative_to(root)}")
@@ -162,6 +200,8 @@ def validate_findings(root: Path, plans: dict[str, dict[str, object]], errors: l
                     errors.append(f"Plan {plan_id!r} does not link to {expected_link}")
         elif has_link:
             errors.append(f"Plan {plan_id!r} contains a stale findings link: {expected_link}")
+        if invalid_ids is not None and len(errors) != plan_errors_before:
+            invalid_ids.add(plan_id)
 
     for project_dir in sorted(
         path
@@ -173,19 +213,25 @@ def validate_findings(root: Path, plans: dict[str, dict[str, object]], errors: l
             continue
         for findings_dir in sorted(path for path in findings_root.iterdir() if path.is_dir()):
             if findings_dir.name not in plans:
-                errors.append(f"Orphaned findings directory: {findings_dir.relative_to(root)}")
+                # Findings attached only to inactive raw input remain inactive too.
+                continue
             elif plans[findings_dir.name]["project"] != project_dir.name:
                 errors.append(f"Findings directory is under wrong project: {findings_dir.relative_to(root)}")
 
 
-def detect_cycles(entries: dict[str, dict[str, object]], errors: list[str]) -> None:
+def detect_cycles(
+    entries: dict[str, dict[str, object]], errors: list[str], invalid_ids: set[str] | None = None
+) -> None:
     visiting: set[str] = set()
     visited: set[str] = set()
 
     def visit(plan_id: str, trail: list[str]) -> None:
         if plan_id in visiting:
             start = trail.index(plan_id)
-            errors.append("Dependency cycle: " + " -> ".join(trail[start:] + [plan_id]))
+            cycle = trail[start:] + [plan_id]
+            errors.append("Dependency cycle: " + " -> ".join(cycle))
+            if invalid_ids is not None:
+                invalid_ids.update(cycle)
             return
         if plan_id in visited:
             return
@@ -277,11 +323,20 @@ def scan(root: Path) -> dict[str, object]:
                     })
                 else:
                     unmanaged_ids.setdefault(plan_id, []).append(relative)
+                    reason = "managed filename failed metadata or orchestration contract"
                     unmanaged.append({
                         "path": relative,
                         "observed_id": plan_id,
-                        "reason": "managed filename failed metadata or orchestration contract",
+                        "reason": reason,
                     })
+                    diagnostics.append(_diagnostic(
+                        "unregistered-plan-file" if entry is None else "invalid-managed-candidate",
+                        f"Markdown input is inactive because its managed contract is incomplete: {reason}",
+                        path=relative,
+                        plan_id=plan_id,
+                        severity="warning" if entry is None else "error",
+                        repair="approval-required",
+                    ))
                 continue
 
             metadata_match = metadata_id_re.search(text)
@@ -334,7 +389,7 @@ def scan(root: Path) -> dict[str, object]:
         managed = kept
 
     for plan_id, paths in sorted(unmanaged_ids.items()):
-        if plan_id in managed_ids or len(paths) > 1 or plan_id in duplicate_ids:
+        if plan_id in entries or plan_id in managed_ids:
             diagnostics.append(_diagnostic(
                 "ambiguous-plan-id",
                 f"Unmanaged input mentions active or duplicate ID {plan_id}: {', '.join(sorted(set(paths)))}",
@@ -354,7 +409,22 @@ def scan(root: Path) -> dict[str, object]:
         ("findings", "findings-lifecycle"),
         ("Findings", "findings-lifecycle"),
     )
-    for message in validate(root):
+    validation_errors, _, invalid_ids = validation_state(root)
+    if invalid_ids:
+        kept = []
+        for item in managed:
+            if item["id"] in invalid_ids:
+                unmanaged.append({
+                    "path": item["path"],
+                    "observed_id": item["id"],
+                    "reason": "registered plan failed managed-state validation",
+                })
+                managed_ids.discard(str(item["id"]))
+            else:
+                kept.append(item)
+        managed = kept
+
+    for message in validation_errors:
         code = "contract-violation"
         for fragment, candidate in code_rules:
             if fragment in message:
@@ -383,10 +453,14 @@ def policy_errors(root: Path) -> list[str]:
     return errors
 
 
-def validate(root: Path) -> list[str]:
+def validation_state(
+    root: Path,
+) -> tuple[list[str], dict[str, dict[str, object]], set[str]]:
+    """Validate active state and identify registered plans unsafe to expose as managed."""
     errors: list[str] = []
+    invalid_ids: set[str] = set()
     if not root.is_dir():
-        return [f"Plans root is not a directory: {root}"]
+        return [f"Plans root is not a directory: {root}"], {}, invalid_ids
     for required in ("README.md", "AGENTS.md", "ORCHESTRATION.md"):
         if not (root / required).is_file():
             errors.append(f"Missing {required}")
@@ -398,23 +472,20 @@ def validate(root: Path) -> list[str]:
             "use the installed planctl wrapper"
         )
 
+    errors_before_registry = len(errors)
     prefixes, entries, retired = parse_registry(orchestration_path, errors)
-    plans = find_plans(root, errors)
+    registry_invalid = len(errors) != errors_before_registry
+    plans = find_plans(root, errors, prefixes, entries)
+    candidates = find_plan_candidates(root)
+    for plan_id in entries:
+        if plan_id not in plans and plan_id in candidates:
+            invalid_ids.add(plan_id)
+    if registry_invalid:
+        invalid_ids.update(plans)
 
     for plan_id, plan in plans.items():
-        match = ID_RE.fullmatch(plan_id)
-        prefix = match.group(1) if match else ""
-        expected_project = prefixes.get(prefix)
-        if expected_project is None:
-            errors.append(f"Plan {plan_id!r} uses unregistered prefix {prefix!r}")
-        elif expected_project != plan["project"]:
-            errors.append(f"Plan {plan_id!r} belongs in {expected_project!r}, not {plan['project']!r}")
-        entry = entries.get(plan_id)
-        if entry is None:
-            errors.append(f"Plan missing from orchestration: {plan_id}")
-            continue
-        if entry["project"] != plan["project"]:
-            errors.append(f"Orchestration project mismatch for {plan_id!r}")
+        entry = entries[plan_id]
+        before = len(errors)
         claimed_by = str(entry["claimed_by"])
         claimed_at = str(entry["claimed_at"])
         has_claimant = claimed_by.lower() not in EMPTY_VALUES
@@ -423,8 +494,16 @@ def validate(root: Path) -> list[str]:
             errors.append(f"Plan {plan_id!r} must set or clear both claim fields")
         if has_claimant and not re.fullmatch(r"[A-Za-z0-9._@:/+-]+", claimed_by):
             errors.append(f"Plan {plan_id!r} has invalid claimant {claimed_by!r}")
-        if has_time and not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", claimed_at):
-            errors.append(f"Plan {plan_id!r} has invalid claim timestamp {claimed_at!r}")
+        if has_time:
+            timestamp_shape = re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", claimed_at
+            )
+            try:
+                if timestamp_shape is None:
+                    raise ValueError
+                datetime.strptime(claimed_at, "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                errors.append(f"Plan {plan_id!r} has invalid claim timestamp {claimed_at!r}")
         if has_claimant and plan["status"] not in {"ready", "verifying"}:
             errors.append(f"Plan {plan_id!r} cannot be claimed while status is {plan['status']!r}")
         dependencies_must_be_done = has_claimant or plan["status"] in {"verifying", "done"}
@@ -436,15 +515,19 @@ def validate(root: Path) -> list[str]:
                         f"Plan {plan_id!r} requires dependency {dependency!r} to be done "
                         f"while status is {plan['status']!r}"
                     )
+        if len(errors) != before:
+            invalid_ids.add(plan_id)
 
     for plan_id, project in retired.items():
         if plan_id in plans:
             errors.append(f"Retired plan ID has an active plan file: {plan_id}")
+            invalid_ids.add(plan_id)
         match = ID_RE.fullmatch(plan_id)
         if match and prefixes.get(match.group(1)) != project:
             errors.append(f"Retired ID prefix/project mismatch for {plan_id!r}")
 
     for plan_id, entry in entries.items():
+        before = len(errors)
         if plan_id not in plans:
             errors.append(f"Orchestration entry has no plan file: {plan_id}")
         match = ID_RE.fullmatch(plan_id)
@@ -455,10 +538,34 @@ def validate(root: Path) -> list[str]:
                 errors.append(f"Plan {plan_id!r} has unresolved dependency {dependency!r}")
             if dependency == plan_id:
                 errors.append(f"Plan {plan_id!r} depends on itself")
+        if len(errors) != before and plan_id in plans:
+            invalid_ids.add(plan_id)
 
-    validate_findings(root, plans, errors)
-    detect_cycles(entries, errors)
-    return errors
+    validate_findings(root, plans, errors, invalid_ids)
+    detect_cycles(entries, errors, invalid_ids)
+
+    # A plan cannot be fully managed when any dependency is itself invalid.
+    changed = True
+    while changed:
+        changed = False
+        for plan_id, plan in plans.items():
+            if plan_id in invalid_ids:
+                continue
+            invalid_dependencies = [
+                str(dependency) for dependency in entries[plan_id]["dependencies"]
+                if str(dependency) in invalid_ids
+            ]
+            if invalid_dependencies:
+                errors.append(
+                    f"Plan {plan_id!r} depends on invalid managed state: {', '.join(invalid_dependencies)}"
+                )
+                invalid_ids.add(plan_id)
+                changed = True
+    return errors, plans, invalid_ids
+
+
+def validate(root: Path) -> list[str]:
+    return validation_state(root)[0]
 
 
 def main() -> int:

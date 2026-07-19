@@ -60,7 +60,7 @@ def load(
 ) -> tuple[dict[str, str], dict[str, dict[str, object]], dict[str, str], dict[str, dict[str, object]]]:
     errors: list[str] = []
     prefixes, entries, retired = validator.parse_registry(root / "ORCHESTRATION.md", errors)
-    plans = validator.find_plans(root, errors)
+    plans = validator.find_plans(root, errors, prefixes, entries)
     if errors:
         raise PlanError("Cannot read plan registry:\n- " + "\n- ".join(errors))
     return prefixes, entries, retired, plans
