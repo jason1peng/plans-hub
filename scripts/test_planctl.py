@@ -11,6 +11,7 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("planctl.py")
 INSTALLER = Path(__file__).with_name("install-skill.sh")
+RELEASE_GUARD = Path(__file__).with_name("check_public_release.py")
 
 ORCHESTRATION = """# Plan Orchestration
 
@@ -94,6 +95,8 @@ class PlanctlTest(unittest.TestCase):
             destination.parent.mkdir(parents=True)
             destination.symlink_to(legacy_skill)
             environment = {**os.environ, "HOME": str(home), "PLANS_ROOT": str(self.root)}
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+            environment.pop("PYTHONPYCACHEPREFIX", None)
 
             installed = subprocess.run(
                 [str(INSTALLER)],
@@ -123,6 +126,16 @@ class PlanctlTest(unittest.TestCase):
                 env=environment,
             )
             self.assertEqual(0, listed.returncode, listed.stderr)
+
+            release_guard = subprocess.run(
+                ["python3", str(RELEASE_GUARD), "--history"],
+                cwd=SCRIPT.parent.parent,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+            self.assertEqual(0, release_guard.returncode, release_guard.stderr)
 
         for existing_kind in ("symlink", "file"):
             with self.subTest(existing_kind=existing_kind), tempfile.TemporaryDirectory() as home_name:

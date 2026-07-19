@@ -9,4 +9,4 @@ if [ ! -x "$client_root/scripts/planctl.py" ]; then
   exit 1
 fi
 
-exec "$client_root/scripts/planctl.py" "$@"
+exec python3 -B "$client_root/scripts/planctl.py" "$@"

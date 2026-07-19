@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import importlib
 import os
 import re
 import shutil
@@ -14,7 +15,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-import validate_plans as validator
+sys.dont_write_bytecode = True
+validator = importlib.import_module("validate_plans")
 
 
 class PlanError(RuntimeError):
