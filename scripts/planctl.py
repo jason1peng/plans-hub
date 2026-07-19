@@ -49,10 +49,34 @@ def empty(value: str) -> bool:
     return value.lower() in validator.EMPTY_VALUES
 
 
-def validate_or_raise(root: Path) -> None:
-    errors = validator.policy_errors(root)
+def validate_repository_or_raise(root: Path) -> None:
+    errors = validator.validate(root)
     if errors:
         raise PlanError("Repository validation failed:\n- " + "\n- ".join(errors))
+
+
+def validate_or_raise(root: Path, *required_ids: str) -> None:
+    """Block only on global ambiguity or state required by this operation."""
+    errors: list[str] = []
+    for required in ("README.md", "AGENTS.md", "ORCHESTRATION.md"):
+        if not (root / required).is_file():
+            errors.append(f"Missing {required}")
+    registry_errors: list[str] = []
+    if (root / "ORCHESTRATION.md").is_file():
+        validator.parse_registry(root / "ORCHESTRATION.md", registry_errors)
+    errors.extend(registry_errors)
+    report = validator.scan(root)
+    for item in report["diagnostics"]:
+        if item["code"] == "ambiguous-plan-id":
+            errors.append(f"ambiguous unmanaged input: {item['message']}")
+    validation_errors, base_plans, invalid_ids = validator.validation_state(root)
+    managed_ids = set(base_plans) - invalid_ids
+    for plan_id in required_ids:
+        if plan_id not in managed_ids:
+            relevant = [message for message in validation_errors if plan_id in message]
+            errors.extend(relevant or [f"Plan {plan_id!r} is not valid managed state"])
+    if errors:
+        raise PlanError("Repository validation failed:\n- " + "\n- ".join(dict.fromkeys(errors)))
 
 
 def load(
@@ -60,9 +84,10 @@ def load(
 ) -> tuple[dict[str, str], dict[str, dict[str, object]], dict[str, str], dict[str, dict[str, object]]]:
     errors: list[str] = []
     prefixes, entries, retired = validator.parse_registry(root / "ORCHESTRATION.md", errors)
-    plans = validator.find_plans(root, errors, prefixes, entries)
     if errors:
         raise PlanError("Cannot read plan registry:\n- " + "\n- ".join(errors))
+    _, base_plans, invalid_ids = validator.validation_state(root)
+    plans = {plan_id: plan for plan_id, plan in base_plans.items() if plan_id not in invalid_ids}
     return prefixes, entries, retired, plans
 
 
@@ -160,12 +185,12 @@ def command_init(root: Path, _args: argparse.Namespace) -> None:
     for source in sorted(templates.iterdir()):
         if source.is_file():
             shutil.copyfile(source, root / source.name)
-    validate_or_raise(root)
+    validate_repository_or_raise(root)
     print(f"Initialized plan hub: {root}")
 
 
 def command_validate(root: Path, _args: argparse.Namespace) -> None:
-    validate_or_raise(root)
+    validate_repository_or_raise(root)
     print(f"Plan storage validation passed: {root}")
 
 
@@ -195,10 +220,8 @@ def repair_proposals(root: Path, report: dict[str, object]) -> list[dict[str, ob
             target_match = validator.STATUS_RE.fullmatch(Path(str(proposal["to"])).name)
             patch_lines = [f"rename {proposal['from']} => {proposal['to']}"]
             if target_match and target_match.group(2) not in entries:
-                plan_id = target_match.group(2)
-                project = Path(str(proposal["to"])).parts[0]
-                proposal["orchestration_row"] = f"| `{plan_id}` | `{project}` | — | — | — |"
-                patch_lines.append(f"ORCHESTRATION.md: + {proposal['orchestration_row']}")
+                proposal["registration_required"] = True
+                proposal["reason"] += "; orchestration registration requires explicit approval"
             proposal["patch"] = "\n".join(patch_lines)
             proposals.append(proposal)
     for item in report["diagnostics"]:
@@ -254,9 +277,6 @@ def command_repair(root: Path, args: argparse.Namespace) -> None:
                 target = root / str(proposal["to"])
                 source.replace(target)
                 moved.append((source, target))
-                row = proposal.get("orchestration_row")
-                if row:
-                    insert_graph_row(root, str(row))
             validate_or_raise(root)
             applied = True
         except Exception:
@@ -277,7 +297,7 @@ def command_repair(root: Path, args: argparse.Namespace) -> None:
 
 def command_show(root: Path, args: argparse.Namespace) -> None:
     plan_id = normalize_id(args.id)
-    validate_or_raise(root)
+    validate_or_raise(root, plan_id)
     _, entries, _, plans = load(root)
     if plan_id not in plans:
         raise PlanError(f"Unknown plan ID: {plan_id}")
@@ -297,7 +317,7 @@ def command_show(root: Path, args: argparse.Namespace) -> None:
 
 def command_ready(root: Path, args: argparse.Namespace) -> None:
     plan_id = normalize_id(args.id)
-    validate_or_raise(root)
+    validate_or_raise(root, plan_id)
     _, entries, _, plans = load(root)
     reasons = readiness(plan_id, entries, plans)
     if reasons:
@@ -344,7 +364,7 @@ def command_allocate(root: Path, args: argparse.Namespace) -> None:
         path.write_text(f"# {title}\n\nID: {plan_id}\nStatus: planning\n", encoding="utf-8")
         insert_graph_row(root, f"| `{plan_id}` | `{project}` | — | — | — |")
         try:
-            validate_or_raise(root)
+            validate_or_raise(root, plan_id)
         except Exception:
             path.unlink(missing_ok=True)
             atomic_write(root / "ORCHESTRATION.md", original_orchestration)
@@ -358,7 +378,7 @@ def command_claim(root: Path, args: argparse.Namespace) -> None:
     if not re.fullmatch(r"[A-Za-z0-9._@:/+-]+", args.agent):
         raise PlanError("Agent name may contain only letters, numbers, and . _ @ : / + -")
     with repository_lock(root):
-        validate_or_raise(root)
+        validate_or_raise(root, plan_id)
         _, entries, _, plans = load(root)
         reasons = readiness(plan_id, entries, plans)
         if reasons:
@@ -368,7 +388,7 @@ def command_claim(root: Path, args: argparse.Namespace) -> None:
         update_graph_row(root, plan_id, 3, f"`{args.agent}`")
         update_graph_row(root, plan_id, 4, f"`{timestamp}`")
         try:
-            validate_or_raise(root)
+            validate_or_raise(root, plan_id)
         except Exception:
             atomic_write(root / "ORCHESTRATION.md", original)
             raise
@@ -378,7 +398,7 @@ def command_claim(root: Path, args: argparse.Namespace) -> None:
 def command_release(root: Path, args: argparse.Namespace) -> None:
     plan_id = normalize_id(args.id)
     with repository_lock(root):
-        validate_or_raise(root)
+        validate_or_raise(root, plan_id)
         _, entries, _, plans = load(root)
         if plan_id not in plans or plan_id not in entries:
             raise PlanError(f"Unknown plan ID: {plan_id}")
@@ -388,7 +408,7 @@ def command_release(root: Path, args: argparse.Namespace) -> None:
         update_graph_row(root, plan_id, 3, "—")
         update_graph_row(root, plan_id, 4, "—")
         try:
-            validate_or_raise(root)
+            validate_or_raise(root, plan_id)
         except Exception:
             atomic_write(root / "ORCHESTRATION.md", original)
             raise
@@ -401,7 +421,7 @@ def command_depends(root: Path, args: argparse.Namespace) -> None:
     if len(dependencies) != len(set(dependencies)):
         raise PlanError("Dependencies must be unique")
     with repository_lock(root):
-        validate_or_raise(root)
+        validate_or_raise(root, plan_id)
         _, entries, _, plans = load(root)
         if plan_id not in plans:
             raise PlanError(f"Unknown plan ID: {plan_id}")
@@ -419,7 +439,7 @@ def command_depends(root: Path, args: argparse.Namespace) -> None:
         value = "<br>".join(f"`{dependency}`" for dependency in dependencies) or "—"
         update_graph_row(root, plan_id, 2, value)
         try:
-            validate_or_raise(root)
+            validate_or_raise(root, plan_id)
         except Exception:
             atomic_write(root / "ORCHESTRATION.md", original)
             raise
@@ -436,7 +456,7 @@ def command_status(root: Path, args: argparse.Namespace) -> None:
         "done": set(),
     }
     with repository_lock(root):
-        validate_or_raise(root)
+        validate_or_raise(root, plan_id)
         _, entries, _, plans = load(root)
         if plan_id not in plans:
             raise PlanError(f"Unknown plan ID: {plan_id}")
@@ -467,7 +487,7 @@ def command_status(root: Path, args: argparse.Namespace) -> None:
         atomic_write(target_path, updated_text)
         source.unlink()
         try:
-            validate_or_raise(root)
+            validate_or_raise(root, plan_id)
         except Exception:
             atomic_write(source, original_text)
             target_path.unlink(missing_ok=True)

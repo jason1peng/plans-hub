@@ -129,6 +129,11 @@ def find_plan_candidates(root: Path) -> dict[str, list[dict[str, object]]]:
     return candidates
 
 
+def metadata_values(text: str, field: str) -> list[str]:
+    """Return every top-level metadata value for a managed contract field."""
+    return re.findall(rf"(?m)^{re.escape(field)}:\s*(.*?)\s*$", text)
+
+
 def find_plans(
     root: Path,
     errors: list[str],
@@ -152,11 +157,13 @@ def find_plans(
             continue
         text = str(plan["text"])
         valid = True
-        if not re.search(rf"(?m)^ID:\s*{re.escape(plan_id)}\s*$", text):
-            errors.append(f"Plan {plan_id!r} has missing or inconsistent ID field")
+        id_values = metadata_values(text, "ID")
+        if id_values != [plan_id]:
+            errors.append(f"Plan {plan_id!r} must have exactly one matching ID field")
             valid = False
-        if not re.search(rf"(?m)^Status:\s*{re.escape(str(plan['status']))}\s*$", text):
-            errors.append(f"Plan {plan_id!r} has missing or inconsistent Status field")
+        status_values = metadata_values(text, "Status")
+        if status_values != [str(plan["status"])]:
+            errors.append(f"Plan {plan_id!r} must have exactly one matching Status field")
             valid = False
         match = ID_RE.fullmatch(plan_id)
         expected_project = prefixes.get(match.group(1) if match else "")
@@ -300,8 +307,8 @@ def scan(root: Path) -> dict[str, object]:
             if match:
                 status, plan_id, name = match.groups()
                 syntactic_ids.setdefault(plan_id, []).append(relative)
-                metadata_id_ok = bool(re.search(rf"(?m)^ID:\s*{re.escape(plan_id)}\s*$", text))
-                metadata_status_ok = bool(re.search(rf"(?m)^Status:\s*{re.escape(status)}\s*$", text))
+                metadata_id_ok = metadata_values(text, "ID") == [plan_id]
+                metadata_status_ok = metadata_values(text, "Status") == [status]
                 prefix_match = ID_RE.fullmatch(plan_id)
                 expected_project = prefixes.get(prefix_match.group(1) if prefix_match else "")
                 entry = entries.get(plan_id)
@@ -389,15 +396,18 @@ def scan(root: Path) -> dict[str, object]:
         managed = kept
 
     for plan_id, paths in sorted(unmanaged_ids.items()):
-        if plan_id in entries or plan_id in managed_ids:
+        unique_paths = sorted(set(paths))
+        if plan_id in entries or plan_id in managed_ids or len(unique_paths) > 1:
             diagnostics.append(_diagnostic(
                 "ambiguous-plan-id",
-                f"Unmanaged input mentions active or duplicate ID {plan_id}: {', '.join(sorted(set(paths)))}",
+                f"Unmanaged input mentions active or duplicate ID {plan_id}: {', '.join(unique_paths)}",
                 plan_id=plan_id,
                 repair="approval-required",
             ))
 
     code_rules = (
+        ("matching ID field", "metadata-id-mismatch"),
+        ("matching Status field", "lifecycle-mismatch"),
         ("missing or inconsistent ID", "metadata-id-mismatch"),
         ("missing or inconsistent Status", "lifecycle-mismatch"),
         ("multiple files", "duplicate-plan-id"),

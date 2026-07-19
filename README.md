@@ -61,7 +61,7 @@ scripts/planctl.py --root "$PLANS_ROOT" repair --apply --json  # automatic-safe 
 scripts/planctl.py --root "$PLANS_ROOT" repair --llm --json    # provider-agnostic proposal handoff
 ```
 
-Automatic repair is restricted to structural facts whose status and ID agree, such as normalizing only a plan-name slug and adding the corresponding empty orchestration row. `--apply` refuses while any semantic or ambiguous diagnostic remains. The LLM handoff contains structured diagnostics and explicit constraints; it can propose a patch only. ID assignment, lifecycle, dependencies, claims, deletion, conflict resolution, application, commits, and pushes always remain explicit host/user actions.
+Automatic repair is restricted to structural facts whose status and ID agree, such as normalizing only a plan-name slug. Registering any raw input in orchestration always requires explicit approval, and `--apply` never activates raw input. `--apply` refuses while any semantic or ambiguous diagnostic remains. The LLM handoff contains structured diagnostics and explicit constraints; it can propose a patch only. ID assignment, registration, lifecycle, dependencies, claims, deletion, conflict resolution, application, commits, and pushes always remain explicit host/user actions.
 
 ## Team synchronization workflow
 

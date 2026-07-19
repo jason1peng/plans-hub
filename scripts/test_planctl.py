@@ -531,6 +531,57 @@ class PlanctlTest(unittest.TestCase):
         self.assertNotIn("DEMO-003", [plan["id"] for plan in payload["managed_plans"]])
         self.assertIn("stale-orchestration-row", {item["code"] for item in payload["diagnostics"]})
 
+    def test_registered_invalid_plan_does_not_block_unrelated_policy_operations(self) -> None:
+        self.run_cli("allocate", "DEMO", "valid")
+        self.run_cli("allocate", "DEMO", "invalid")
+        orchestration = self.root / "ORCHESTRATION.md"
+        orchestration.write_text(
+            orchestration.read_text(encoding="utf-8").replace(
+                "| `DEMO-002` | `demo-project` | — | — | — |",
+                "| `DEMO-002` | `demo-project` | `DEMO-999` | — | — |",
+            ),
+            encoding="utf-8",
+        )
+
+        self.run_cli("depends", "DEMO-001")
+        self.run_cli("status", "DEMO-001", "ready")
+        self.run_cli("ready", "DEMO-001")
+        self.run_cli("claim", "DEMO-001", "test-agent")
+        allocated = self.run_cli("allocate", "DEMO", "next")
+        self.assertIn("DEMO-003", allocated.stdout)
+        invalid = self.run_cli("ready", "DEMO-002", succeeds=False)
+        self.assertIn("unresolved dependency", invalid.stderr)
+
+    def test_duplicate_raw_ids_are_diagnosed_as_ambiguous(self) -> None:
+        project = self.root / "demo-project"
+        project.mkdir()
+        for name in ("first", "second"):
+            (project / f"planning--DEMO-999--{name}.md").write_text(
+                f"# {name}\n\nID: DEMO-999\nStatus: planning\n", encoding="utf-8"
+            )
+
+        payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        ambiguity = [item for item in payload["diagnostics"] if item["code"] == "ambiguous-plan-id"]
+        self.assertEqual(["DEMO-999"], [item["plan_id"] for item in ambiguity])
+
+    def test_registered_plan_requires_exactly_one_id_and_status_field(self) -> None:
+        self.run_cli("allocate", "DEMO", "metadata")
+        plan = self.root / "demo-project" / "planning--DEMO-001--metadata.md"
+        original = plan.read_text(encoding="utf-8")
+        duplicate_fields = (
+            ("ID: DEMO-999\n", "metadata-id-mismatch"),
+            ("Status: ready\n", "lifecycle-mismatch"),
+        )
+        for extra, code in duplicate_fields:
+            with self.subTest(extra=extra):
+                plan.write_text(original + extra, encoding="utf-8")
+                payload = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+                self.assertEqual([], payload["managed_plans"])
+                self.assertIn(code, {item["code"] for item in payload["diagnostics"]})
+                blocked = self.run_cli("show", "DEMO-001", succeeds=False)
+                self.assertIn("exactly one matching", blocked.stderr)
+        plan.write_text(original, encoding="utf-8")
+
     def test_validate_rejects_impossible_utc_claim_timestamps(self) -> None:
         self.run_cli("allocate", "DEMO", "claimed")
         self.run_cli("status", "DEMO-001", "ready")
@@ -552,6 +603,7 @@ class PlanctlTest(unittest.TestCase):
         project.mkdir()
         source = project / "planning--DEMO-001--Sample Plan.md"
         source.write_text("# Sample plan\n\nID: DEMO-001\nStatus: planning\n", encoding="utf-8")
+        original_orchestration = (self.root / "ORCHESTRATION.md").read_text(encoding="utf-8")
 
         dry_run = self.run_cli("repair", "--json")
         payload = __import__("json").loads(dry_run.stdout)
@@ -569,6 +621,9 @@ class PlanctlTest(unittest.TestCase):
         self.assertIn('"applied": true', applied.stdout)
         self.assertFalse(source.exists())
         self.assertTrue((project / "planning--DEMO-001--sample-plan.md").exists())
+        self.assertEqual(original_orchestration, (self.root / "ORCHESTRATION.md").read_text(encoding="utf-8"))
+        scan = __import__("json").loads(self.run_cli("scan", "--json").stdout)
+        self.assertEqual([], scan["managed_plans"])
 
 
 if __name__ == "__main__":
