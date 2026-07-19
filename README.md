@@ -37,9 +37,9 @@ The first release uses explicit, low-contention Git synchronization rather than 
 ```sh
 git -C "$PLANS_ROOT" fetch origin
 git -C "$PLANS_ROOT" merge --ff-only origin/main
-scripts/planctl.py list-ready
-scripts/planctl.py claim DEMO-001 agent-name
-scripts/planctl.py validate
+scripts/planctl.py --root "$PLANS_ROOT" list-ready
+scripts/planctl.py --root "$PLANS_ROOT" claim DEMO-001 agent-name
+scripts/planctl.py --root "$PLANS_ROOT" validate
 git -C "$PLANS_ROOT" add ORCHESTRATION.md
 git -C "$PLANS_ROOT" commit -m 'plans(DEMO-001): claim'
 git -C "$PLANS_ROOT" push origin main       # never force
@@ -55,6 +55,6 @@ python3 -m compileall -q scripts
 python3 scripts/check_public_release.py --history
 ```
 
-The release guard enforces an allowlisted tree and rejects plan-status files, findings, generated artifacts, credential-bearing URLs, every non-`DEMO` plan identifier, unapproved project-like kebab-case markers, and caller-supplied private fragments across the index and every reachable commit. Build releases only from fresh public history; never copy a private hub's `.git` directory or rewrite its history for publication.
+The release guard enforces an allowlisted tree and rejects plan-status files, findings, generated artifacts, credential-bearing URLs, real project prefixes, every non-`DEMO` plan identifier, unapproved project-like kebab-case markers, and caller-supplied private fragments across the working tree, index, and every reachable commit. Build releases only from fresh public history; never copy a private hub's `.git` directory or rewrite its history for publication.
 
 Licensed under the MIT License.

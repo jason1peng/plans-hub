@@ -26,6 +26,11 @@ GENERATED_PATH = re.compile(r"(^|/)(?:\.pi-subagents|__pycache__)(?:/|$)|\.py[co
 CREDENTIAL_URL = re.compile(r"https?://[^/\s:@]+:[^/\s@]+@")
 PLAN_IDENTIFIER = re.compile(r"(?<![A-Z0-9])([A-Z][A-Z0-9]*)-[0-9]{3,}(?![A-Z0-9])")
 SYNTHETIC_PLAN_PREFIXES = {"DEMO"}
+# Keep private prefixes out of this public source even as guard configuration.
+PRIVATE_PROJECT_PREFIXES = {
+    "".join(parts) for parts in (("A", "GP"), ("P", "LAN"), ("P", "VCC"), ("T", "EST"), ("TR", "IP"))
+}
+STANDALONE_UPPERCASE = re.compile(r"(?<![A-Z0-9_])([A-Z][A-Z0-9]{2,})(?![A-Z0-9_])")
 KEBAB_MARKER = re.compile(r"(?<![a-z0-9])([a-z0-9]+(?:-[a-z0-9]+)+)(?![a-z0-9])")
 ALLOWED_KEBAB_MARKERS = {
     "0-9", "a-z0-9", "after-retired", "agent-name", "caller-supplied", "ci-plan",
@@ -48,6 +53,9 @@ def tracked_files(root: Path, revision: str | None = None) -> list[str]:
 
 
 def content_at(root: Path, path: str, revision: str | None) -> bytes:
+    if revision == "working tree":
+        worktree_path = root / path
+        return worktree_path.read_bytes() if worktree_path.is_file() else b""
     object_name = f"{revision}:{path}" if revision else f":{path}"
     result = subprocess.run(
         ["git", "-C", str(root), "show", object_name],
@@ -58,15 +66,16 @@ def content_at(root: Path, path: str, revision: str | None) -> bytes:
 
 
 def revisions(root: Path, include_history: bool) -> list[str | None]:
+    snapshots: list[str | None] = ["working tree", None]
     if not include_history:
-        return [None]
+        return snapshots
     result = subprocess.run(
         ["git", "-C", str(root), "rev-list", "--all"],
         text=True,
         capture_output=True,
         check=True,
     )
-    return [None, *result.stdout.splitlines()]
+    return [*snapshots, *result.stdout.splitlines()]
 
 
 def main() -> int:
@@ -80,7 +89,8 @@ def main() -> int:
 
     for revision in revisions(root, args.history):
         label = revision or "index"
-        for path in tracked_files(root, revision):
+        tree_revision = None if revision == "working tree" else revision
+        for path in tracked_files(root, tree_revision):
             top = path.split("/", 1)[0]
             if top not in ALLOWED_TOP_LEVEL:
                 errors.append(f"{label}: unexpected top-level path: {path}")
@@ -95,6 +105,9 @@ def main() -> int:
             for match in PLAN_IDENTIFIER.finditer(text):
                 if match.group(1) not in SYNTHETIC_PLAN_PREFIXES:
                     errors.append(f"{label}: non-synthetic plan identifier in {path}: {match.group(0)!r}")
+            for match in STANDALONE_UPPERCASE.finditer(text):
+                if match.group(1) in PRIVATE_PROJECT_PREFIXES:
+                    errors.append(f"{label}: private project prefix in {path}: {match.group(0)!r}")
             for match in KEBAB_MARKER.finditer(text):
                 if match.group(1) not in ALLOWED_KEBAB_MARKERS:
                     errors.append(f"{label}: unapproved project-like marker in {path}: {match.group(0)!r}")

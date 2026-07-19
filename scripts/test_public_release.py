@@ -53,6 +53,34 @@ class PublicReleaseGuardTest(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("index: credential-bearing URL in README.md", result.stderr)
 
+    def test_scans_unsafe_worktree_copy_when_index_is_safe(self) -> None:
+        readme = self.root / "README.md"
+        credential_url = "https://user" + ":secret@example.invalid/private\n"
+        readme.write_text(credential_url, encoding="utf-8")
+
+        result = self.guard()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("working tree: credential-bearing URL in README.md", result.stderr)
+        self.assertNotIn("index: credential-bearing URL in README.md", result.stderr)
+
+    def test_scans_unsafe_history_when_index_and_worktree_are_safe(self) -> None:
+        readme = self.root / "README.md"
+        credential_url = "https://user" + ":secret@example.invalid/private\n"
+        readme.write_text(credential_url, encoding="utf-8")
+        self.git("add", "README.md")
+        self.git("commit", "-qm", "unsafe")
+        readme.write_text("# Safe current copy\n", encoding="utf-8")
+        self.git("add", "README.md")
+        self.git("commit", "-qm", "safe")
+
+        result = self.guard()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("credential-bearing URL in README.md", result.stderr)
+        self.assertNotIn("working tree: credential-bearing URL", result.stderr)
+        self.assertNotIn("index: credential-bearing URL", result.stderr)
+
     def test_rejects_non_synthetic_identifier_without_forbid_option(self) -> None:
         private_identifier = "ACME" + "-999"
         (self.root / "README.md").write_text(f"Private plan: {private_identifier}\n", encoding="utf-8")
@@ -63,6 +91,17 @@ class PublicReleaseGuardTest(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("index: non-synthetic plan identifier", result.stderr)
         self.assertIn(private_identifier, result.stderr)
+
+    def test_rejects_standalone_private_project_prefix(self) -> None:
+        private_prefix = "TR" + "IP"
+        (self.root / "README.md").write_text(f"Private project prefix: {private_prefix}\n", encoding="utf-8")
+        self.git("add", "README.md")
+
+        result = self.guard()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("index: private project prefix", result.stderr)
+        self.assertIn(private_prefix, result.stderr)
 
     def test_rejects_unapproved_project_marker_without_forbid_option(self) -> None:
         private_project = "acme" + "-service"

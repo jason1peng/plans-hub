@@ -147,6 +147,73 @@ class PlanctlTest(unittest.TestCase):
                 self.assertNotEqual(0, rejected.returncode)
                 self.assertIn("refusing to replace existing", rejected.stderr)
 
+    def test_documented_git_sequence_targets_private_hub_from_public_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace_name:
+            workspace = Path(workspace_name)
+            seed = workspace / "seed"
+            remote = workspace / "remote.git"
+            worker = workspace / "worker"
+            verification = workspace / "verification"
+
+            initialized = subprocess.run(
+                ["python3", str(SCRIPT), "--root", str(seed), "init"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, initialized.returncode, initialized.stderr)
+            subprocess.run(["git", "-C", str(seed), "init", "-q", "-b", "main"], check=True)
+            subprocess.run(["git", "-C", str(seed), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(seed), "config", "user.name", "Test"], check=True)
+            for arguments in (("allocate", "DEMO", "first-plan"), ("status", "DEMO-001", "ready")):
+                result = subprocess.run(
+                    ["python3", str(SCRIPT), "--root", str(seed), *arguments],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+            subprocess.run(["git", "-C", str(seed), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(seed), "commit", "-qm", "initialize hub"], check=True)
+            subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(seed), "remote", "add", "origin", str(remote)], check=True)
+            subprocess.run(["git", "-C", str(seed), "push", "-q", "-u", "origin", "main"], check=True)
+            subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(worker)], check=True)
+            subprocess.run(["git", "-C", str(worker), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(worker), "config", "user.name", "Test"], check=True)
+
+            # Run from the public client checkout while every Git operation explicitly targets the private hub.
+            environment = {**os.environ, "PLANS_ROOT": str(worker)}
+            for command in (
+                ["git", "-C", str(worker), "fetch", "origin"],
+                ["git", "-C", str(worker), "merge", "--ff-only", "origin/main"],
+                ["python3", str(SCRIPT), "--root", str(worker), "list-ready"],
+                ["python3", str(SCRIPT), "--root", str(worker), "claim", "DEMO-001", "agent-name"],
+                ["python3", str(SCRIPT), "--root", str(worker), "validate"],
+                ["git", "-C", str(worker), "add", "ORCHESTRATION.md"],
+                ["git", "-C", str(worker), "commit", "-m", "plans(DEMO-001): claim"],
+                ["git", "-C", str(worker), "push", "origin", "main"],
+            ):
+                result = subprocess.run(
+                    command,
+                    cwd=SCRIPT.parent.parent,
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(0, result.returncode, f"{command}\n{result.stdout}\n{result.stderr}")
+
+            subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(verification)], check=True)
+            shown = subprocess.run(
+                ["python3", str(SCRIPT), "--root", str(verification), "show", "DEMO-001"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, shown.returncode, shown.stderr)
+            self.assertIn("Claim: agent-name", shown.stdout)
+
     def test_init_bootstraps_external_synthetic_hub(self) -> None:
         initialized = self.root / "initialized-hub"
         result = subprocess.run(
