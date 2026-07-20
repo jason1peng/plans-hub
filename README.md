@@ -97,6 +97,6 @@ PYTHONPYCACHEPREFIX="$(mktemp -d)" python3 -m compileall -q scripts
 python3 scripts/check_public_release.py --history
 ```
 
-The release guard enforces an allowlisted tree and rejects plan-status files, findings, generated artifacts, credential-bearing URLs, real project prefixes, every non-`DEMO` plan identifier, unapproved project-like kebab-case markers, and caller-supplied private fragments across tracked, untracked, and ignored working-tree files, the index, reachable commit trees, and reachable commit metadata/messages. Build releases only from fresh public history; never copy a private hub's `.git` directory or rewrite its history for publication.
+The release guard enforces an allowlisted tree and rejects plan-status files, findings, generated artifacts, credential-bearing URLs, every non-`DEMO` plan identifier, and caller-supplied private fragments across tracked, untracked, and ignored working-tree files, the index, reachable commit trees, and reachable commit metadata/messages. Normal project, branch, and worktree names require no global configuration; release builders can pass repeated `--forbid FRAGMENT` arguments for private names specific to their environment. Build releases only from fresh public history; never copy a private hub's `.git` directory or rewrite its history for publication.
 
 Licensed under the MIT License.

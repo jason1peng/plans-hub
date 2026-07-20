@@ -26,32 +26,6 @@ GENERATED_PATH = re.compile(r"(^|/)(?:\.pi-subagents|__pycache__)(?:/|$)|\.py[co
 CREDENTIAL_URL = re.compile(r"https?://[^/\s:@]+:[^/\s@]+@")
 PLAN_IDENTIFIER = re.compile(r"(?<![A-Z0-9])([A-Z][A-Z0-9]*)-[0-9]{3,}(?![A-Z0-9])")
 SYNTHETIC_PLAN_PREFIXES = {"DEMO"}
-# Keep private prefixes out of this public source even as guard configuration.
-PRIVATE_PROJECT_PREFIXES = {
-    "".join(parts) for parts in (("A", "GP"), ("P", "LAN"), ("P", "VCC"), ("T", "EST"), ("TR", "IP"))
-}
-STANDALONE_UPPERCASE = re.compile(r"(?<![A-Z0-9_])([A-Z][A-Z0-9]{2,})(?![A-Z0-9_])")
-KEBAB_MARKER = re.compile(r"(?<![a-z0-9])([a-z0-9]+(?:-[a-z0-9]+)+)(?![a-z0-9])")
-ALLOWED_KEBAB_MARKERS = {
-    "0-9", "a-z0-9", "after-retired", "agent-name", "allow-empty", "ambiguous-plan-id", "approval-required",
-    "automatic-safe", "caller-supplied", "cat-file", "ci-plan", "clean-state", "company-internal", "contract-violation",
-    "completed-agent", "completed-dependency", "credential-bearing", "cycle-peer", "demo-001", "dependency-cycle",
-    "demo-project", "dependency-agent", "downstream-agent", "dry-run", "duplicate-plan-id", "fast-forward",
-    "fetch-depth", "ff-only", "findings-lifecycle",
-    "first-plan", "force-push", "git-common-dir", "human-readable", "ignored-secret", "initialized-hub",
-    "install-skill", "invalid-claim", "invalid-managed-candidate", "invalid-project-folder", "it-backed",
-    "kebab-case", "lifecycle-mismatch", "line-length", "list-ready", "llm-proposal-handoff", "low-contention",
-    "ls-files", "ls-tree", "malformed-plan-id", "managed-plan", "managed-state", "manual-review", "metadata-id-mismatch",
-    "machine-local", "missing-dependency", "missing-orchestration-row", "name-only", "non-empty", "non-synthetic",
-    "pi-claim-intercom-convention", "pi-intercom", "pi-subagents",
-    "plan-003-policy", "plan-hub", "plan-name", "plan-state", "plan-status", "plans-hub", "policy-aware", "provider-agnostic",
-    "post-migration", "private-hub", "project-like", "python-version", "read-only", "re-evaluate", "re-run",
-    "rev-list", "rev-parse", "root-not-directory", "runs-on", "sample-plan", "setup-python", "shared-plan",
-    "review-only", "shared-plan-storage", "stale-orchestration-row", "test-agent", "top-level", "ubuntu-latest",
-    "unknown-skill", "unmanaged-file", "unmanaged-plan-file", "unregistered-plan-file", "untracked-secret",
-    "upstream-agent", "utf-8",
-    "with-claude", "working-tree",
-}
 
 
 def snapshot_files(root: Path, revision: str | None = None) -> list[str]:
@@ -115,12 +89,6 @@ def scan_project_markers(text: str, label: str, errors: list[str]) -> None:
     for match in PLAN_IDENTIFIER.finditer(text):
         if match.group(1) not in SYNTHETIC_PLAN_PREFIXES:
             errors.append(f"{label}: non-synthetic plan identifier: {match.group(0)!r}")
-    for match in STANDALONE_UPPERCASE.finditer(text):
-        if match.group(1) in PRIVATE_PROJECT_PREFIXES:
-            errors.append(f"{label}: private project prefix: {match.group(0)!r}")
-    for match in KEBAB_MARKER.finditer(text):
-        if match.group(1) not in ALLOWED_KEBAB_MARKERS:
-            errors.append(f"{label}: unapproved project-like marker: {match.group(0)!r}")
 
 
 def scan_text(text: str, label: str, errors: list[str], forbidden_fragments: list[str]) -> None:
