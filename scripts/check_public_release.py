@@ -43,7 +43,7 @@ ALLOWED_KEBAB_MARKERS = {
     "kebab-case", "lifecycle-mismatch", "line-length", "list-ready", "llm-proposal-handoff", "low-contention",
     "ls-files", "ls-tree", "malformed-plan-id", "managed-plan", "managed-state", "manual-review", "metadata-id-mismatch",
     "machine-local", "missing-dependency", "missing-orchestration-row", "name-only", "non-empty", "non-synthetic",
-    "pi-intercom", "pi-subagents",
+    "pi-claim-intercom-convention", "pi-intercom", "pi-subagents",
     "plan-003-policy", "plan-hub", "plan-name", "plan-state", "plan-status", "plans-hub", "policy-aware", "provider-agnostic",
     "post-migration", "private-hub", "project-like", "python-version", "read-only", "re-evaluate", "re-run",
     "rev-list", "rev-parse", "root-not-directory", "runs-on", "sample-plan", "setup-python", "shared-plan",

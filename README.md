@@ -89,12 +89,6 @@ scripts/planctl.py --root "$PLANS_ROOT" ready DEMO-001
 
 Inspect the current claim and dependencies before deciding whether to make a new claim. If `reset --keep` refuses because of local changes, stop and preserve/reconcile them manually; do not use `--hard`, blindly replay the rejected claim, or force-push shared state. Concurrent allocation and claims across clones require manual coordination in this release.
 
-### Optional Pi session coordination
-
-When a claim owner is a Pi session with `pi-intercom` installed, name the session with a stable, identifiable `/name` value and use that exact name as the `claim` agent argument. Other Pi sessions on the same machine may then use `intercom` to list and contact the active owner.
-
-This is an optional coordination convention, not part of the datastore contract. Human names and non-Pi tool identifiers remain valid claim owners. A claim does not prove that a matching session is online, and intercom discovery or reachability must never be required for validation, readiness, release, or other lifecycle operations.
-
 ## Development and release checks
 
 ```sh
