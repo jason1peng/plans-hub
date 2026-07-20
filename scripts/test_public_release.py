@@ -131,26 +131,28 @@ class PublicReleaseGuardTest(unittest.TestCase):
         self.assertIn("index: README.md: non-synthetic plan identifier", result.stderr)
         self.assertIn(private_identifier, result.stderr)
 
-    def test_rejects_standalone_private_project_prefix(self) -> None:
-        private_prefix = "TR" + "IP"
-        (self.root / "README.md").write_text(f"Private project prefix: {private_prefix}\n", encoding="utf-8")
+    def test_allows_project_and_worktree_names_without_global_configuration(self) -> None:
+        project_name = "acme" + "-service"
+        worktree_name = "feature" + "-absolute-plan-path"
+        (self.root / "README.md").write_text(
+            f"Project: {project_name}\nWorktree: {worktree_name}\n",
+            encoding="utf-8",
+        )
         self.git("add", "README.md")
 
         result = self.guard()
 
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("index: README.md: private project prefix", result.stderr)
-        self.assertIn(private_prefix, result.stderr)
+        self.assertEqual(0, result.returncode, result.stderr)
 
-    def test_rejects_unapproved_project_marker_without_forbid_option(self) -> None:
+    def test_rejects_caller_supplied_private_project_fragment(self) -> None:
         private_project = "acme" + "-service"
         (self.root / "README.md").write_text(f"Private project: {private_project}\n", encoding="utf-8")
         self.git("add", "README.md")
 
-        result = self.guard()
+        result = self.guard("--forbid", private_project)
 
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("index: README.md: unapproved project-like marker", result.stderr)
+        self.assertIn("index: README.md: forbidden private fragment", result.stderr)
         self.assertIn(private_project, result.stderr)
 
 

@@ -308,7 +308,7 @@ def command_show(root: Path, args: argparse.Namespace) -> None:
     print(f"ID: {plan_id}")
     print(f"Project: {plan['project']}")
     print(f"Status: {plan['status']}")
-    print(f"Path: {Path(plan['path']).relative_to(root)}")
+    print(f"Path: {Path(plan['path']).resolve()}")
     print(f"Depends on: {dependencies}")
     print(f"Claim: {claim}")
     print("\n--- Plan ---\n")
@@ -370,7 +370,7 @@ def command_allocate(root: Path, args: argparse.Namespace) -> None:
             atomic_write(root / "ORCHESTRATION.md", original_orchestration)
             raise
     print(plan_id)
-    print(path.relative_to(root))
+    print(path.resolve())
 
 
 def command_claim(root: Path, args: argparse.Namespace) -> None:

@@ -89,12 +89,6 @@ scripts/planctl.py --root "$PLANS_ROOT" ready DEMO-001
 
 Inspect the current claim and dependencies before deciding whether to make a new claim. If `reset --keep` refuses because of local changes, stop and preserve/reconcile them manually; do not use `--hard`, blindly replay the rejected claim, or force-push shared state. Concurrent allocation and claims across clones require manual coordination in this release.
 
-### Optional Pi session coordination
-
-When a claim owner is a Pi session with `pi-intercom` installed, name the session with a stable, identifiable `/name` value and use that exact name as the `claim` agent argument. Other Pi sessions on the same machine may then use `intercom` to list and contact the active owner.
-
-This is an optional coordination convention, not part of the datastore contract. Human names and non-Pi tool identifiers remain valid claim owners. A claim does not prove that a matching session is online, and intercom discovery or reachability must never be required for validation, readiness, release, or other lifecycle operations.
-
 ## Development and release checks
 
 ```sh
@@ -103,6 +97,6 @@ PYTHONPYCACHEPREFIX="$(mktemp -d)" python3 -m compileall -q scripts
 python3 scripts/check_public_release.py --history
 ```
 
-The release guard enforces an allowlisted tree and rejects plan-status files, findings, generated artifacts, credential-bearing URLs, real project prefixes, every non-`DEMO` plan identifier, unapproved project-like kebab-case markers, and caller-supplied private fragments across tracked, untracked, and ignored working-tree files, the index, reachable commit trees, and reachable commit metadata/messages. Build releases only from fresh public history; never copy a private hub's `.git` directory or rewrite its history for publication.
+The release guard enforces an allowlisted tree and rejects plan-status files, findings, generated artifacts, credential-bearing URLs, every non-`DEMO` plan identifier, and caller-supplied private fragments across tracked, untracked, and ignored working-tree files, the index, reachable commit trees, and reachable commit metadata/messages. Normal project, branch, and worktree names require no global configuration; release builders can pass repeated `--forbid FRAGMENT` arguments for private names specific to their environment. Build releases only from fresh public history; never copy a private hub's `.git` directory or rewrite its history for publication.
 
 Licensed under the MIT License.
