@@ -330,8 +330,10 @@ class PlanctlTest(unittest.TestCase):
         self.assertIn("DEMO-001", result.stdout)
         plan = self.root / "demo-project" / "planning--DEMO-001--first-plan.md"
         self.assertTrue(plan.is_file())
+        self.assertEqual(["DEMO-001", str(plan.resolve())], result.stdout.splitlines())
 
-        self.run_cli("show", "demo-001")
+        shown = self.run_cli("show", "demo-001")
+        self.assertIn(f"Path: {plan.resolve()}", shown.stdout)
         self.run_cli("ready", "DEMO-001", succeeds=False)
         self.run_cli("status", "DEMO-001", "ready")
         self.run_cli("ready", "DEMO-001")
