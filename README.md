@@ -30,6 +30,42 @@ scripts/planctl.py validate
 
 `--root PATH` overrides `PLANS_ROOT`. There is intentionally no fallback to the public client checkout. Keep the hub remote private and use credential helpers or SSH; do not put tokens in remote URLs or committed files.
 
+## Multiple plan hubs
+
+One client can serve several hubs (for example a team hub and a personal hub, each its own private Git repository). Register them by name in a roots registry kept outside this repository so private paths never enter public history:
+
+The registry lives at `${XDG_CONFIG_HOME:-~/.config}/plans-hub/roots.json` (override with `PLANS_HUB_CONFIG`):
+
+```json
+{
+  "schema_version": 1,
+  "roots": [
+    { "name": "team",     "path": "/path/to/team-hub" },
+    { "name": "personal", "path": "/path/to/personal-hub" }
+  ]
+}
+```
+
+Root names are unique lowercase kebab-case; paths are unique absolute paths resolved at load. A malformed registry (bad JSON, duplicates, missing fields, unknown `schema_version`) is a hard error, never silently ignored. Edit the file directly; there are no registry management subcommands.
+
+Single-hub commands (`show`, `ready`, `allocate`, `claim`, `release`, `depends`, `status`, `validate`, `scan`, `repair`, `init`, `list-ready`) keep operating on exactly one hub, resolved by precedence:
+
+1. `--root PATH|NAME` — an existing filesystem path wins; otherwise the value resolves as a registry root name (an unrecognized value stays a path, so `init` into a new directory keeps working);
+2. `PLANS_ROOT` — legacy single-root mode;
+3. a registry with exactly one root;
+4. a multi-root registry never guesses: pass `--root NAME` or set `PLANS_ROOT`.
+
+Two read-only commands operate on the effective root *set* (`--root`, else the registry, else `PLANS_ROOT`) and never require a single hub:
+
+```sh
+scripts/planctl.py roots              # name, path, source, and validity of every configured hub
+scripts/planctl.py locate DEMO-001    # find which hub manages an ID: unique | not-found | ambiguous
+```
+
+Both support `--json` with `schema_version`, and `locate` exits 0 for every outcome — agents consume the `result` field, not exit codes. If `PLANS_ROOT` is set while a multi-root registry exists and does not match a registered path, both commands warn that `PLANS_ROOT` shadows the registry for single-hub commands.
+
+Agent workflow policy lives in the installed skill: when saving a new plan with multiple valid roots and no named hub, the agent asks which hub to use; when a bare plan ID is referenced without a hub, `planctl locate` scans every configured hub, and only the resolved hub is fetched and fast-forwarded before any mutation. Plan ID prefixes are independent namespaces per hub — the same ID may legitimately exist in two hubs, in which case `locate` reports `ambiguous` and the user picks one.
+
 ## Datastore contract and scanning
 
 The private repository is a passive Git-backed datastore; this client owns the managed-plan protocol. A managed plan:

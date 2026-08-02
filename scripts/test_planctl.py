@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -865,6 +866,365 @@ class PlanctlTest(unittest.TestCase):
         self.assertEqual(original_orchestration, (self.root / "ORCHESTRATION.md").read_text(encoding="utf-8"))
         scan = __import__("json").loads(self.run_cli("scan", "--json").stdout)
         self.assertEqual([], scan["managed_plans"])
+
+
+class MultiRootTest(unittest.TestCase):
+    """Multi-root registry, roots/locate commands, and root-selection precedence."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp.name)
+        self.home = self.base / "home"
+        self.home.mkdir()
+        self.empty_home = self.base / "empty-home"
+        self.empty_home.mkdir()
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def make_hub(self, path: Path) -> Path:
+        (path / ".git").mkdir(parents=True)
+        (path / ".pi-subagents").mkdir()
+        (path / "README.md").write_text("# Plans\n", encoding="utf-8")
+        (path / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
+        (path / "ORCHESTRATION.md").write_text(ORCHESTRATION, encoding="utf-8")
+        return path
+
+    def write_config(self, roots: list[dict[str, str]] | None = None, *, raw: str | None = None,
+                     version: int = 1) -> Path:
+        config = self.home / ".config" / "plans-hub" / "roots.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        if raw is None:
+            raw = json.dumps({"schema_version": version, "roots": roots if roots is not None else []})
+        config.write_text(raw, encoding="utf-8")
+        return config
+
+    def env(self, **overrides: str) -> dict[str, str]:
+        environment = os.environ.copy()
+        for key in ("PLANS_ROOT", "PLANS_HUB_CONFIG", "XDG_CONFIG_HOME"):
+            environment.pop(key, None)
+        environment["HOME"] = str(self.home)
+        environment.update(overrides)
+        return environment
+
+    def run_cli(self, *arguments: str, env: dict[str, str] | None = None, cwd: Path | None = None,
+                succeeds: bool = True) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            ["python3", str(SCRIPT), *arguments],
+            text=True,
+            capture_output=True,
+            check=False,
+            env=env if env is not None else self.env(),
+            cwd=cwd,
+        )
+        if succeeds and result.returncode != 0:
+            self.fail(f"command failed: {arguments}\nstdout={result.stdout}\nstderr={result.stderr}")
+        if not succeeds and result.returncode == 0:
+            self.fail(f"command unexpectedly passed: {arguments}\nstdout={result.stdout}")
+        return result
+
+    def assert_config_error(self, fragment: str) -> None:
+        result = self.run_cli("roots", succeeds=False)
+        self.assertIn("roots registry", result.stderr)
+        self.assertIn(fragment, result.stderr)
+
+    def test_missing_default_config_means_no_registry(self) -> None:
+        result = self.run_cli("roots")
+        self.assertIn("No plan hubs configured", result.stdout)
+
+    def test_explicit_config_override_must_exist(self) -> None:
+        missing = self.base / "missing.json"
+        result = self.run_cli("roots", env=self.env(PLANS_HUB_CONFIG=str(missing)), succeeds=False)
+        self.assertIn("does not exist", result.stderr)
+
+    def test_config_strict_validation(self) -> None:
+        self.write_config(raw="{ not json")
+        self.assert_config_error("not valid JSON")
+        self.write_config(raw="[]")
+        self.assert_config_error("top level must be a JSON object")
+        self.write_config(raw='{"schema_version": 1}')
+        self.assert_config_error("roots must be a JSON array")
+        self.write_config([{"name": "alpha", "path": "/hub-a"}], version=2)
+        self.assert_config_error("schema_version must be 1")
+        self.write_config([{"name": "alpha", "path": "/hub-a"}, {"name": "alpha", "path": "/hub-b"}])
+        self.assert_config_error("duplicates root name 'alpha'")
+        self.write_config([{"name": "alpha", "path": "/hub-a"}, {"name": "beta", "path": "/hub-a"}])
+        self.assert_config_error("duplicates root path '/hub-a'")
+        self.write_config([{"name": "Alpha", "path": "/hub-a"}])
+        self.assert_config_error("name must be a lowercase kebab-case string")
+        self.write_config([{"name": "alpha", "path": "relative/hub"}])
+        self.assert_config_error("path must be absolute")
+        self.write_config([{"name": "alpha"}])
+        self.assert_config_error("path must be an absolute path string")
+        self.write_config([{"path": "/hub-a"}])
+        self.assert_config_error("name must be a lowercase kebab-case string")
+
+    def test_config_location_overrides(self) -> None:
+        hub = self.make_hub(self.base / "alpha-hub")
+        entry = {"name": "alpha", "path": str(hub)}
+        custom = self.base / "custom.json"
+        custom.write_text(json.dumps({"schema_version": 1, "roots": [entry]}), encoding="utf-8")
+        result = self.run_cli("roots", env=self.env(PLANS_HUB_CONFIG=str(custom)))
+        self.assertIn("alpha", result.stdout)
+        self.assertIn(str(hub.resolve()), result.stdout)
+
+        xdg = self.base / "xdg"
+        (xdg / "plans-hub").mkdir(parents=True)
+        (xdg / "plans-hub" / "roots.json").write_text(
+            json.dumps({"schema_version": 1, "roots": [entry]}), encoding="utf-8"
+        )
+        result = self.run_cli("roots", env=self.env(XDG_CONFIG_HOME=str(xdg)))
+        self.assertIn("alpha", result.stdout)
+        self.assertIn(str(hub.resolve()), result.stdout)
+
+    def test_root_precedence_matrix(self) -> None:
+        alpha = self.make_hub(self.base / "alpha-hub")
+        beta = self.make_hub(self.base / "beta-hub")
+        self.write_config([
+            {"name": "alpha", "path": str(alpha)},
+            {"name": "beta", "path": str(beta)},
+        ])
+
+        # --root as an existing path beats PLANS_ROOT and the registry.
+        result = self.run_cli("--root", str(beta), "validate", env=self.env(PLANS_ROOT=str(alpha)))
+        self.assertIn(str(beta.resolve()), result.stdout)
+
+        # --root otherwise resolves as a registry root name.
+        result = self.run_cli("--root", "alpha", "validate")
+        self.assertIn(str(alpha.resolve()), result.stdout)
+
+        # PLANS_ROOT beats the registry (legacy single-root mode).
+        result = self.run_cli("validate", env=self.env(PLANS_ROOT=str(beta)))
+        self.assertIn(str(beta.resolve()), result.stdout)
+
+        # A multi-root registry never guesses for single-hub commands.
+        result = self.run_cli("validate", succeeds=False)
+        self.assertIn("multiple plan hubs configured (alpha, beta)", result.stderr)
+
+        # A single-root registry is used when nothing else selects a hub.
+        self.write_config([{"name": "alpha", "path": str(alpha)}])
+        result = self.run_cli("validate")
+        self.assertIn(str(alpha.resolve()), result.stdout)
+
+        # Nothing configured: the legacy error is unchanged.
+        result = self.run_cli("validate", env=self.env(HOME=str(self.empty_home)), succeeds=False)
+        self.assertIn("no plan hub selected", result.stderr)
+
+    def test_root_value_matching_existing_directory_and_name_resolves_as_path(self) -> None:
+        registered = self.make_hub(self.base / "registered-hub")
+        self.write_config([{"name": "alpha", "path": str(registered)}])
+        workspace = self.base / "workspace"
+        collision = self.make_hub(workspace / "alpha")
+
+        result = self.run_cli("--root", "alpha", "validate", cwd=workspace)
+
+        self.assertIn(str(collision.resolve()), result.stdout)
+        self.assertNotIn(str(registered.resolve()), result.stdout)
+
+    def test_roots_and_locate_bypass_the_single_root_requirement(self) -> None:
+        alpha = self.make_hub(self.base / "alpha-hub")
+        beta = self.make_hub(self.base / "beta-hub")
+        self.write_config([
+            {"name": "alpha", "path": str(alpha)},
+            {"name": "beta", "path": str(beta)},
+        ])
+
+        # No PLANS_ROOT and only a config file: both commands succeed without a single root.
+        roots = self.run_cli("roots")
+        self.assertIn("alpha", roots.stdout)
+        locate = self.run_cli("locate", "DEMO-001")
+        self.assertIn("Result: not-found", locate.stdout)
+
+        # With nothing configured at all both commands still exit 0.
+        roots = self.run_cli("roots", env=self.env(HOME=str(self.empty_home)))
+        self.assertIn("No plan hubs configured", roots.stdout)
+        locate = self.run_cli("locate", "DEMO-001", env=self.env(HOME=str(self.empty_home)))
+        self.assertIn("Result: not-found", locate.stdout)
+
+    def test_roots_reports_validity_and_sources(self) -> None:
+        ok_hub = self.make_hub(self.base / "ok-hub")
+        missing = self.base / "missing-hub"
+        not_a_hub = self.base / "not-a-hub"
+        not_a_hub.mkdir()
+        self.write_config([
+            {"name": "ok", "path": str(ok_hub)},
+            {"name": "lost", "path": str(missing)},
+            {"name": "raw", "path": str(not_a_hub)},
+        ])
+
+        payload = json.loads(self.run_cli("roots", "--json").stdout)
+        self.assertEqual(1, payload["schema_version"])
+        self.assertEqual([], payload["warnings"])
+        by_name = {entry["name"]: entry for entry in payload["roots"]}
+        self.assertEqual("ok", by_name["ok"]["validity"])
+        self.assertEqual("missing-path", by_name["lost"]["validity"])
+        self.assertEqual("not-a-hub", by_name["raw"]["validity"])
+        self.assertEqual({"config"}, {entry["source"] for entry in payload["roots"]})
+        self.assertEqual(str(ok_hub.resolve()), by_name["ok"]["path"])
+
+        # --root overrides the registry with a single command-line-sourced root.
+        payload = json.loads(self.run_cli("--root", str(ok_hub), "roots", "--json").stdout)
+        self.assertEqual(1, len(payload["roots"]))
+        self.assertIsNone(payload["roots"][0]["name"])
+        self.assertEqual("--root", payload["roots"][0]["source"])
+
+        # PLANS_ROOT-only legacy mode is a single root sourced from the environment.
+        payload = json.loads(
+            self.run_cli("roots", "--json", env=self.env(HOME=str(self.empty_home), PLANS_ROOT=str(ok_hub))).stdout
+        )
+        self.assertEqual("PLANS_ROOT", payload["roots"][0]["source"])
+        self.assertIsNone(payload["roots"][0]["name"])
+
+        # Nothing configured: an empty set with a note, still exit 0.
+        payload = json.loads(self.run_cli("roots", "--json", env=self.env(HOME=str(self.empty_home))).stdout)
+        self.assertEqual([], payload["roots"])
+
+    def test_plans_root_shadow_warning(self) -> None:
+        alpha = self.make_hub(self.base / "alpha-hub")
+        beta = self.make_hub(self.base / "beta-hub")
+        foreign = self.make_hub(self.base / "foreign-hub")
+        self.write_config([
+            {"name": "alpha", "path": str(alpha)},
+            {"name": "beta", "path": str(beta)},
+        ])
+
+        for arguments in (("roots",), ("locate", "DEMO-001")):
+            result = self.run_cli(*arguments, env=self.env(PLANS_ROOT=str(foreign)))
+            self.assertIn("shadows the roots registry", result.stderr)
+
+        # Suppressed when PLANS_ROOT resolves to a registered path.
+        result = self.run_cli("roots", env=self.env(PLANS_ROOT=str(alpha)))
+        self.assertEqual("", result.stderr)
+
+        # Absent for a single-root registry.
+        self.write_config([{"name": "alpha", "path": str(alpha)}])
+        result = self.run_cli("roots", env=self.env(PLANS_ROOT=str(foreign)))
+        self.assertEqual("", result.stderr)
+
+    def test_locate_unique_not_found_and_ambiguous(self) -> None:
+        alpha = self.make_hub(self.base / "alpha-hub")
+        beta = self.make_hub(self.base / "beta-hub")
+        self.write_config([
+            {"name": "alpha", "path": str(alpha)},
+            {"name": "beta", "path": str(beta)},
+        ])
+        self.run_cli("--root", str(alpha), "allocate", "DEMO", "alpha-plan")
+
+        unique = self.run_cli("locate", "demo-001")
+        self.assertIn("Result: unique", unique.stdout)
+        self.assertIn(f"Hub: alpha ({alpha.resolve()})", unique.stdout)
+        self.assertIn("Project: demo-project", unique.stdout)
+        self.assertIn("Status: planning", unique.stdout)
+        self.assertIn("planning--DEMO-001--alpha-plan.md", unique.stdout)
+
+        missing = self.run_cli("locate", "DEMO-042")
+        self.assertIn("Result: not-found", missing.stdout)
+        self.assertIn("Searched hubs: alpha, beta", missing.stdout)
+
+        self.run_cli("--root", str(beta), "allocate", "DEMO", "beta-plan")
+        ambiguous = self.run_cli("locate", "DEMO-001")
+        self.assertIn("Result: ambiguous", ambiguous.stdout)
+        self.assertIn(str(alpha.resolve()), ambiguous.stdout)
+        self.assertIn(str(beta.resolve()), ambiguous.stdout)
+
+        payload = json.loads(self.run_cli("locate", "DEMO-001", "--json").stdout)
+        self.assertEqual(1, payload["schema_version"])
+        self.assertEqual("DEMO-001", payload["id"])
+        self.assertEqual("ambiguous", payload["result"])
+        self.assertEqual(["alpha", "beta"], sorted(hit["root"] for hit in payload["hits"]))
+        for hit in payload["hits"]:
+            self.assertIn(hit["hub"], {str(alpha.resolve()), str(beta.resolve())})
+            self.assertEqual("demo-project", hit["project"])
+            self.assertEqual("planning", hit["status"])
+            self.assertTrue(hit["plan_path"].startswith(hit["hub"]))
+        self.assertEqual(["alpha", "beta"], [entry["name"] for entry in payload["searched"]])
+        self.assertEqual([], payload["warnings"])
+
+    def test_locate_skips_unreachable_roots_with_a_warning(self) -> None:
+        alpha = self.make_hub(self.base / "alpha-hub")
+        missing = self.base / "missing-hub"
+        self.write_config([
+            {"name": "alpha", "path": str(alpha)},
+            {"name": "gone", "path": str(missing)},
+        ])
+        self.run_cli("--root", str(alpha), "allocate", "DEMO", "alpha-plan")
+
+        result = self.run_cli("locate", "DEMO-001")
+
+        self.assertIn("Result: unique", result.stdout)
+        self.assertIn("skipped root gone: missing-path", result.stderr)
+        payload = json.loads(self.run_cli("locate", "DEMO-001", "--json").stdout)
+        self.assertEqual(["alpha"], [entry["name"] for entry in payload["searched"]])
+        self.assertEqual(1, len(payload["warnings"]))
+
+    def test_locate_reports_ambiguous_mentions_as_warnings_never_hits(self) -> None:
+        alpha = self.make_hub(self.base / "alpha-hub")
+        beta = self.make_hub(self.base / "beta-hub")
+        self.write_config([
+            {"name": "alpha", "path": str(alpha)},
+            {"name": "beta", "path": str(beta)},
+        ])
+        project = alpha / "demo-project"
+        project.mkdir()
+        for name in ("draft-a.md", "draft-b.md"):
+            (project / name).write_text("# Draft\n\nID: DEMO-001\nStatus: planning\n", encoding="utf-8")
+
+        result = self.run_cli("locate", "DEMO-001")
+        self.assertIn("Result: not-found", result.stdout)
+        self.assertIn("DEMO-001", result.stderr)
+        self.assertIn("ambiguous", result.stderr.lower())
+
+        self.run_cli("--root", str(beta), "allocate", "DEMO", "beta-plan")
+        result = self.run_cli("locate", "DEMO-001")
+        self.assertIn("Result: unique", result.stdout)
+        self.assertIn(f"Hub: beta ({beta.resolve()})", result.stdout)
+        self.assertIn("ambiguous", result.stderr.lower())
+
+    def test_locate_never_hits_registered_but_invalid_plans(self) -> None:
+        alpha = self.make_hub(self.base / "alpha-hub")
+        beta = self.make_hub(self.base / "beta-hub")
+        self.write_config([
+            {"name": "alpha", "path": str(alpha)},
+            {"name": "beta", "path": str(beta)},
+        ])
+        self.run_cli("--root", str(alpha), "allocate", "DEMO", "first")
+        self.run_cli("--root", str(alpha), "allocate", "DEMO", "second")
+        orchestration = alpha / "ORCHESTRATION.md"
+        text = orchestration.read_text(encoding="utf-8")
+        text = text.replace(
+            "| `DEMO-001` | `demo-project` | — |", "| `DEMO-001` | `demo-project` | `DEMO-002` |"
+        )
+        text = text.replace(
+            "| `DEMO-002` | `demo-project` | — |", "| `DEMO-002` | `demo-project` | `DEMO-001` |"
+        )
+        orchestration.write_text(text, encoding="utf-8")
+
+        result = self.run_cli("locate", "DEMO-001")
+
+        self.assertIn("Result: not-found", result.stdout)
+        self.assertIn("Searched hubs: alpha, beta", result.stdout)
+
+    def test_unknown_id_hint_requires_a_multi_root_registry(self) -> None:
+        alpha = self.make_hub(self.base / "alpha-hub")
+        beta = self.make_hub(self.base / "beta-hub")
+        self.write_config([
+            {"name": "alpha", "path": str(alpha)},
+            {"name": "beta", "path": str(beta)},
+        ])
+
+        hinted = self.run_cli("--root", str(alpha), "show", "DEMO-009", succeeds=False)
+        self.assertIn("run 'planctl locate DEMO-009' to search all configured hubs", hinted.stderr)
+
+        self.write_config([{"name": "alpha", "path": str(alpha)}])
+        plain = self.run_cli("--root", str(alpha), "show", "DEMO-009", succeeds=False)
+        self.assertNotIn("planctl locate", plain.stderr)
+
+        legacy = self.run_cli(
+            "--root", str(alpha), "show", "DEMO-009",
+            env=self.env(HOME=str(self.empty_home)),
+            succeeds=False,
+        )
+        self.assertNotIn("planctl locate", legacy.stderr)
 
 
 if __name__ == "__main__":
