@@ -7,7 +7,6 @@ import argparse
 import fcntl
 import importlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -38,31 +37,23 @@ class RootRef(NamedTuple):
 
     name: str | None
     path: Path
-    source: str  # "config" | "PLANS_ROOT" | "--root"
+    source: str  # "config" | "--root"
 
 
-CONFIG_ENV = "PLANS_HUB_CONFIG"
 CONFIG_SCHEMA_VERSION = 1
 ROOT_NAME_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 HUB_REQUIRED_FILES = ("ORCHESTRATION.md", "README.md", "AGENTS.md")
 
 
-def registry_path() -> tuple[Path, bool]:
-    """Return the roots registry path and whether it was explicitly selected."""
-    override = os.environ.get(CONFIG_ENV)
-    if override:
-        return Path(override).expanduser(), True
-    base = os.environ.get("XDG_CONFIG_HOME")
-    config_home = Path(base).expanduser() if base else Path.home() / ".config"
-    return config_home / "plans-hub" / "roots.json", False
+def registry_path() -> Path:
+    """Return the fixed roots registry path."""
+    return Path.home() / ".config" / "plans-hub" / "roots.json"
 
 
 def load_registry() -> list[RootRef]:
     """Load the roots registry; a broken registry is never silently ignored."""
-    path, explicit = registry_path()
+    path = registry_path()
     if not path.is_file():
-        if explicit:
-            raise PlanError(f"roots registry selected by {CONFIG_ENV} does not exist: {path}")
         return []
     try:
         raw = path.read_text(encoding="utf-8")
@@ -142,44 +133,30 @@ def resolve_command_line_root(value: Path) -> RootRef:
 def configured_root(command_line_root: Path | None) -> Path:
     """Resolve storage independently from the client checkout.
 
-    Precedence: --root PATH|name > PLANS_ROOT > a single-root registry. A
-    multi-root registry never guesses a hub for single-hub commands. There is
+    Precedence: --root PATH|NAME > a single-root registry. A multi-root
+    registry never guesses a hub for single-hub commands. There is
     deliberately no fallback to the source checkout: this client is software,
     not plan data.
     """
     if command_line_root is not None:
         return resolve_command_line_root(command_line_root).path
-    configured = os.environ.get("PLANS_ROOT")
-    if configured:
-        return Path(configured).expanduser().resolve()
     registry = load_registry()
     if len(registry) == 1:
         return registry[0].path
     if len(registry) > 1:
         names = ", ".join(str(root.name) for root in registry)
-        raise PlanError(f"multiple plan hubs configured ({names}); pass --root NAME or set PLANS_ROOT")
-    raise PlanError("no plan hub selected; pass --root PATH or set PLANS_ROOT")
+        raise PlanError(f"multiple plan hubs configured ({names}); pass --root NAME")
+    raise PlanError(
+        "no plan hub selected; pass --root PATH|NAME or create a roots registry "
+        f"at {registry_path()}"
+    )
 
 
 def effective_roots(command_line_root: Path | None) -> tuple[list[RootRef], list[str]]:
     """Resolve the root set for roots/locate without requiring a single hub."""
     if command_line_root is not None:
         return [resolve_command_line_root(command_line_root)], []
-    warnings: list[str] = []
-    registry = load_registry()
-    configured = os.environ.get("PLANS_ROOT")
-    if registry:
-        if configured and len(registry) > 1:
-            shadow = Path(configured).expanduser().resolve()
-            if all(root.path != shadow for root in registry):
-                warnings.append(
-                    f"PLANS_ROOT ({shadow}) is not a configured root; it shadows the "
-                    "roots registry for single-hub commands"
-                )
-        return registry, warnings
-    if configured:
-        return [RootRef(None, Path(configured).expanduser().resolve(), "PLANS_ROOT")], warnings
-    return [], warnings
+    return load_registry(), []
 
 
 def multi_root_registry() -> bool:
@@ -366,8 +343,7 @@ def command_roots(roots: list[RootRef], warnings: list[str], args: argparse.Name
         print(json.dumps({"schema_version": 1, "roots": entries, "warnings": warnings}, indent=2, sort_keys=True))
     else:
         if not entries:
-            path, _ = registry_path()
-            print(f"No plan hubs configured; set PLANS_ROOT or create a roots registry at {path}")
+            print(f"No plan hubs configured; create a roots registry at {registry_path()}")
         for entry in entries:
             print(f"{entry['name'] or '—'}\t{entry['path']}\t{entry['source']}\t{entry['validity']}")
     for warning in warnings:
@@ -745,7 +721,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "plan-hub checkout path or configured root name "
-            "(overrides PLANS_ROOT; never defaults to the client checkout)"
+            "(never defaults to the client checkout)"
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)

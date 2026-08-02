@@ -75,40 +75,45 @@ class PlanctlTest(unittest.TestCase):
         self.assertIn("references removed private client path", result.stderr)
         self.assertIn("use the installed planctl wrapper", result.stderr)
 
-    def test_root_is_required_and_explicit_root_overrides_environment(self) -> None:
-        environment = os.environ.copy()
-        environment.pop("PLANS_ROOT", None)
-        missing = subprocess.run(
-            ["python3", str(SCRIPT), "validate"],
-            text=True,
-            capture_output=True,
-            check=False,
-            env=environment,
-        )
-        self.assertNotEqual(0, missing.returncode)
-        self.assertIn("no plan hub selected", missing.stderr)
+    def test_root_is_required_and_explicit_root_selects_the_hub(self) -> None:
+        with tempfile.TemporaryDirectory() as home_name:
+            environment = {**os.environ, "HOME": home_name}
+            missing = subprocess.run(
+                ["python3", str(SCRIPT), "validate"],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+            self.assertNotEqual(0, missing.returncode)
+            self.assertIn("no plan hub selected", missing.stderr)
 
-        environment["PLANS_ROOT"] = str(self.root / "missing")
-        explicit = subprocess.run(
-            ["python3", str(SCRIPT), "--root", str(self.root), "validate"],
-            text=True,
-            capture_output=True,
-            check=False,
-            env=environment,
-        )
-        self.assertEqual(0, explicit.returncode, explicit.stderr)
+            explicit = subprocess.run(
+                ["python3", str(SCRIPT), "--root", str(self.root), "validate"],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=environment,
+            )
+            self.assertEqual(0, explicit.returncode, explicit.stderr)
 
     def test_documented_existing_hub_onboarding_upgrades_and_uses_installed_wrapper(self) -> None:
-        # The supported order is: select PLANS_ROOT, install, then invoke the full wrapper path.
+        # The supported order is: register the hub, install, then invoke the full wrapper path.
         legacy_skill = self.root.resolve() / "skills" / "shared-plan-storage"
         self.assertFalse(legacy_skill.exists(), "exercise the dangling post-migration legacy link")
 
         with tempfile.TemporaryDirectory() as home_name:
             home = Path(home_name)
+            registry = home / ".config" / "plans-hub" / "roots.json"
+            registry.parent.mkdir(parents=True)
+            registry.write_text(
+                json.dumps({"schema_version": 1, "roots": [{"name": "main", "path": str(self.root)}]}),
+                encoding="utf-8",
+            )
             destination = home / ".agents" / "skills" / "shared-plan-storage"
             destination.parent.mkdir(parents=True)
             destination.symlink_to(legacy_skill)
-            environment = {**os.environ, "HOME": str(home), "PLANS_ROOT": str(self.root)}
+            environment = {**os.environ, "HOME": str(home)}
             environment.pop("PYTHONDONTWRITEBYTECODE", None)
             environment.pop("PYTHONPYCACHEPREFIX", None)
 
@@ -162,7 +167,7 @@ class PlanctlTest(unittest.TestCase):
                     destination.symlink_to(unknown)
                 else:
                     destination.write_text("do not replace\n", encoding="utf-8")
-                environment = {**os.environ, "HOME": str(home), "PLANS_ROOT": str(self.root)}
+                environment = {**os.environ, "HOME": str(home)}
 
                 rejected = subprocess.run(
                     [str(INSTALLER)],
@@ -210,7 +215,6 @@ class PlanctlTest(unittest.TestCase):
             subprocess.run(["git", "-C", str(worker), "config", "user.name", "Test"], check=True)
 
             # Run from the public client checkout while every Git operation explicitly targets the private hub.
-            environment = {**os.environ, "PLANS_ROOT": str(worker)}
             for command in (
                 ["git", "-C", str(worker), "fetch", "origin"],
                 ["git", "-C", str(worker), "merge", "--ff-only", "origin/main"],
@@ -224,7 +228,6 @@ class PlanctlTest(unittest.TestCase):
                 result = subprocess.run(
                     command,
                     cwd=SCRIPT.parent.parent,
-                    env=environment,
                     text=True,
                     capture_output=True,
                     check=False,
@@ -901,8 +904,6 @@ class MultiRootTest(unittest.TestCase):
 
     def env(self, **overrides: str) -> dict[str, str]:
         environment = os.environ.copy()
-        for key in ("PLANS_ROOT", "PLANS_HUB_CONFIG", "XDG_CONFIG_HOME"):
-            environment.pop(key, None)
         environment["HOME"] = str(self.home)
         environment.update(overrides)
         return environment
@@ -932,11 +933,6 @@ class MultiRootTest(unittest.TestCase):
         result = self.run_cli("roots")
         self.assertIn("No plan hubs configured", result.stdout)
 
-    def test_explicit_config_override_must_exist(self) -> None:
-        missing = self.base / "missing.json"
-        result = self.run_cli("roots", env=self.env(PLANS_HUB_CONFIG=str(missing)), succeeds=False)
-        self.assertIn("does not exist", result.stderr)
-
     def test_config_strict_validation(self) -> None:
         self.write_config(raw="{ not json")
         self.assert_config_error("not valid JSON")
@@ -959,24 +955,6 @@ class MultiRootTest(unittest.TestCase):
         self.write_config([{"path": "/hub-a"}])
         self.assert_config_error("name must be a lowercase kebab-case string")
 
-    def test_config_location_overrides(self) -> None:
-        hub = self.make_hub(self.base / "alpha-hub")
-        entry = {"name": "alpha", "path": str(hub)}
-        custom = self.base / "custom.json"
-        custom.write_text(json.dumps({"schema_version": 1, "roots": [entry]}), encoding="utf-8")
-        result = self.run_cli("roots", env=self.env(PLANS_HUB_CONFIG=str(custom)))
-        self.assertIn("alpha", result.stdout)
-        self.assertIn(str(hub.resolve()), result.stdout)
-
-        xdg = self.base / "xdg"
-        (xdg / "plans-hub").mkdir(parents=True)
-        (xdg / "plans-hub" / "roots.json").write_text(
-            json.dumps({"schema_version": 1, "roots": [entry]}), encoding="utf-8"
-        )
-        result = self.run_cli("roots", env=self.env(XDG_CONFIG_HOME=str(xdg)))
-        self.assertIn("alpha", result.stdout)
-        self.assertIn(str(hub.resolve()), result.stdout)
-
     def test_root_precedence_matrix(self) -> None:
         alpha = self.make_hub(self.base / "alpha-hub")
         beta = self.make_hub(self.base / "beta-hub")
@@ -985,28 +963,24 @@ class MultiRootTest(unittest.TestCase):
             {"name": "beta", "path": str(beta)},
         ])
 
-        # --root as an existing path beats PLANS_ROOT and the registry.
-        result = self.run_cli("--root", str(beta), "validate", env=self.env(PLANS_ROOT=str(alpha)))
+        # --root as an existing path beats the registry.
+        result = self.run_cli("--root", str(beta), "validate")
         self.assertIn(str(beta.resolve()), result.stdout)
 
         # --root otherwise resolves as a registry root name.
         result = self.run_cli("--root", "alpha", "validate")
         self.assertIn(str(alpha.resolve()), result.stdout)
 
-        # PLANS_ROOT beats the registry (legacy single-root mode).
-        result = self.run_cli("validate", env=self.env(PLANS_ROOT=str(beta)))
-        self.assertIn(str(beta.resolve()), result.stdout)
-
         # A multi-root registry never guesses for single-hub commands.
         result = self.run_cli("validate", succeeds=False)
         self.assertIn("multiple plan hubs configured (alpha, beta)", result.stderr)
 
-        # A single-root registry is used when nothing else selects a hub.
+        # A single-root registry is used when no --root selects a hub.
         self.write_config([{"name": "alpha", "path": str(alpha)}])
         result = self.run_cli("validate")
         self.assertIn(str(alpha.resolve()), result.stdout)
 
-        # Nothing configured: the legacy error is unchanged.
+        # Nothing configured: selecting a hub fails.
         result = self.run_cli("validate", env=self.env(HOME=str(self.empty_home)), succeeds=False)
         self.assertIn("no plan hub selected", result.stderr)
 
@@ -1029,7 +1003,7 @@ class MultiRootTest(unittest.TestCase):
             {"name": "beta", "path": str(beta)},
         ])
 
-        # No PLANS_ROOT and only a config file: both commands succeed without a single root.
+        # Only a registry: both commands succeed without selecting a single root.
         roots = self.run_cli("roots")
         self.assertIn("alpha", roots.stdout)
         locate = self.run_cli("locate", "DEMO-001")
@@ -1068,38 +1042,9 @@ class MultiRootTest(unittest.TestCase):
         self.assertIsNone(payload["roots"][0]["name"])
         self.assertEqual("--root", payload["roots"][0]["source"])
 
-        # PLANS_ROOT-only legacy mode is a single root sourced from the environment.
-        payload = json.loads(
-            self.run_cli("roots", "--json", env=self.env(HOME=str(self.empty_home), PLANS_ROOT=str(ok_hub))).stdout
-        )
-        self.assertEqual("PLANS_ROOT", payload["roots"][0]["source"])
-        self.assertIsNone(payload["roots"][0]["name"])
-
         # Nothing configured: an empty set with a note, still exit 0.
         payload = json.loads(self.run_cli("roots", "--json", env=self.env(HOME=str(self.empty_home))).stdout)
         self.assertEqual([], payload["roots"])
-
-    def test_plans_root_shadow_warning(self) -> None:
-        alpha = self.make_hub(self.base / "alpha-hub")
-        beta = self.make_hub(self.base / "beta-hub")
-        foreign = self.make_hub(self.base / "foreign-hub")
-        self.write_config([
-            {"name": "alpha", "path": str(alpha)},
-            {"name": "beta", "path": str(beta)},
-        ])
-
-        for arguments in (("roots",), ("locate", "DEMO-001")):
-            result = self.run_cli(*arguments, env=self.env(PLANS_ROOT=str(foreign)))
-            self.assertIn("shadows the roots registry", result.stderr)
-
-        # Suppressed when PLANS_ROOT resolves to a registered path.
-        result = self.run_cli("roots", env=self.env(PLANS_ROOT=str(alpha)))
-        self.assertEqual("", result.stderr)
-
-        # Absent for a single-root registry.
-        self.write_config([{"name": "alpha", "path": str(alpha)}])
-        result = self.run_cli("roots", env=self.env(PLANS_ROOT=str(foreign)))
-        self.assertEqual("", result.stderr)
 
     def test_locate_unique_not_found_and_ambiguous(self) -> None:
         alpha = self.make_hub(self.base / "alpha-hub")
@@ -1219,12 +1164,12 @@ class MultiRootTest(unittest.TestCase):
         plain = self.run_cli("--root", str(alpha), "show", "DEMO-009", succeeds=False)
         self.assertNotIn("planctl locate", plain.stderr)
 
-        legacy = self.run_cli(
+        no_registry = self.run_cli(
             "--root", str(alpha), "show", "DEMO-009",
             env=self.env(HOME=str(self.empty_home)),
             succeeds=False,
         )
-        self.assertNotIn("planctl locate", legacy.stderr)
+        self.assertNotIn("planctl locate", no_registry.stderr)
 
 
 if __name__ == "__main__":

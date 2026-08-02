@@ -7,13 +7,13 @@ description: Resolve and maintain implementation plans by stable ID in separatel
 
 ## Select the hub
 
-The public client checkout contains software only. Select private plan-hub checkouts explicitly; never infer plan storage from the installed skill or client location. Multiple hubs may be registered by name in `${XDG_CONFIG_HOME:-~/.config}/plans-hub/roots.json` (override with `PLANS_HUB_CONFIG`); `planctl roots` lists the effective root set with each root's validity.
+The public client checkout contains software only. Select private plan-hub checkouts explicitly; never infer plan storage from the installed skill or client location. Multiple hubs may be registered by name in `~/.config/plans-hub/roots.json`; `planctl roots` lists the effective root set with each root's validity.
 
 - **Explicit hub mention wins.** If the user names a hub by configured name or path, resolve it with `--root NAME` (or `--root PATH`) and proceed — no prompt, no scan.
 - **Saving a new plan:** run `planctl roots`. If the effective set has more than one valid root and the user did not name a hub, ask which root to use before `planctl allocate`; never default silently. With exactly one root, proceed without asking.
 - **Resolving an existing bare ID:** run `planctl locate <ID>` to scan every configured hub. On `unique`, operate on the returned hub. On `ambiguous`, ask the user which hub. On `not-found`, report the hubs searched.
 
-Single-hub commands resolve exactly one root: `--root PATH|NAME` beats `PLANS_ROOT`, which beats a single-root registry; a multi-root registry never guesses and asks for `--root NAME`. When a bare ID fails in the resolved hub and multiple hubs are configured, planctl suggests `planctl locate <ID>`.
+Single-hub commands resolve exactly one root: `--root PATH|NAME` beats a single-root registry; a multi-root registry never guesses and asks for `--root NAME`. When a bare ID fails in the resolved hub and multiple hubs are configured, planctl suggests `planctl locate <ID>`.
 
 Before changing state, read the selected hub's `AGENTS.md`, `README.md`, and `ORCHESTRATION.md`. Use `planctl scan` for a read-only inventory; raw or malformed Markdown remains inactive until it satisfies the public client's managed-plan contract. Resolve an existing plan with `planctl show <ID>` and use its returned path. Run `planctl ready <ID>` and claim eligible work before implementation. Do not implement blocked, planning, or claimed work.
 
