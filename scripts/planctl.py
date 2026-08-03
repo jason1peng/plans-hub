@@ -7,7 +7,6 @@ import argparse
 import fcntl
 import importlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -15,6 +14,7 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 sys.dont_write_bytecode = True
 validator = importlib.import_module("validate_plans")
@@ -24,18 +24,154 @@ class PlanError(RuntimeError):
     pass
 
 
+class UnknownPlanIDError(PlanError):
+    """A required plan ID is not valid managed state in the resolved hub."""
+
+    def __init__(self, message: str, plan_id: str | None = None) -> None:
+        super().__init__(message)
+        self.plan_id = plan_id
+
+
+class RootRef(NamedTuple):
+    """One plan hub in the effective root set."""
+
+    name: str | None
+    path: Path
+    source: str  # "config" | "--root"
+
+
+CONFIG_SCHEMA_VERSION = 1
+ROOT_NAME_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+HUB_REQUIRED_FILES = ("ORCHESTRATION.md", "README.md", "AGENTS.md")
+
+
+def registry_path() -> Path:
+    """Return the fixed roots registry path."""
+    return Path.home() / ".config" / "plans-hub" / "roots.json"
+
+
+def load_registry() -> list[RootRef]:
+    """Load the roots registry; a broken registry is never silently ignored."""
+    path = registry_path()
+    if not path.is_file():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise PlanError(f"cannot read roots registry: {path}: {error}") from error
+    try:
+        document = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise PlanError(f"roots registry is not valid JSON: {path}: {error}") from error
+    problems: list[str] = []
+    roots: list[RootRef] = []
+    names: set[str] = set()
+    paths: set[Path] = set()
+    if not isinstance(document, dict):
+        problems.append("top level must be a JSON object")
+    else:
+        if document.get("schema_version") != CONFIG_SCHEMA_VERSION:
+            problems.append(f"schema_version must be {CONFIG_SCHEMA_VERSION}")
+        entries = document.get("roots")
+        if not isinstance(entries, list):
+            problems.append("roots must be a JSON array")
+        else:
+            for index, entry in enumerate(entries):
+                label = f"roots[{index}]"
+                if not isinstance(entry, dict):
+                    problems.append(f"{label} must be a JSON object")
+                    continue
+                name = entry.get("name")
+                raw_path = entry.get("path")
+                ok = True
+                if not isinstance(name, str) or not ROOT_NAME_RE.fullmatch(name):
+                    problems.append(f"{label}.name must be a lowercase kebab-case string")
+                    ok = False
+                elif name in names:
+                    problems.append(f"{label}.name duplicates root name {name!r}")
+                    ok = False
+                resolved: Path | None = None
+                if not isinstance(raw_path, str) or not raw_path:
+                    problems.append(f"{label}.path must be an absolute path string")
+                    ok = False
+                else:
+                    resolved = Path(raw_path).expanduser()
+                    if not resolved.is_absolute():
+                        problems.append(f"{label}.path must be absolute: {raw_path!r}")
+                        ok = False
+                    else:
+                        resolved = resolved.resolve()
+                        if resolved in paths:
+                            problems.append(f"{label}.path duplicates root path {raw_path!r}")
+                            ok = False
+                if not ok or resolved is None:
+                    continue
+                names.add(str(name))
+                paths.add(resolved)
+                roots.append(RootRef(str(name), resolved, "config"))
+    if problems:
+        raise PlanError(f"roots registry is invalid: {path}:\n- " + "\n- ".join(problems))
+    return roots
+
+
+def resolve_command_line_root(value: Path) -> RootRef:
+    """Resolve --root as an existing path first, then as a registry root name.
+
+    A value matching neither stays a (possibly not yet created) path, so legacy
+    usage such as init into a new directory keeps working byte-for-byte.
+    """
+    candidate = value.expanduser()
+    if candidate.exists():
+        return RootRef(None, candidate.resolve(), "--root")
+    name = str(value)
+    for root in load_registry():
+        if root.name == name:
+            return RootRef(name, root.path, "--root")
+    return RootRef(None, candidate.resolve(), "--root")
+
+
 def configured_root(command_line_root: Path | None) -> Path:
     """Resolve storage independently from the client checkout.
 
-    An explicit --root always wins over PLANS_ROOT. There is deliberately no
-    fallback to the source checkout: this client is software, not plan data.
+    Precedence: --root PATH|NAME > a single-root registry. A multi-root
+    registry never guesses a hub for single-hub commands. There is
+    deliberately no fallback to the source checkout: this client is software,
+    not plan data.
     """
     if command_line_root is not None:
-        return command_line_root.expanduser().resolve()
-    configured = os.environ.get("PLANS_ROOT")
-    if configured:
-        return Path(configured).expanduser().resolve()
-    raise PlanError("no plan hub selected; pass --root PATH or set PLANS_ROOT")
+        return resolve_command_line_root(command_line_root).path
+    registry = load_registry()
+    if len(registry) == 1:
+        return registry[0].path
+    if len(registry) > 1:
+        names = ", ".join(str(root.name) for root in registry)
+        raise PlanError(f"multiple plan hubs configured ({names}); pass --root NAME")
+    raise PlanError(
+        "no plan hub selected; pass --root PATH|NAME or create a roots registry "
+        f"at {registry_path()}"
+    )
+
+
+def effective_roots(command_line_root: Path | None) -> tuple[list[RootRef], list[str]]:
+    """Resolve the root set for roots/locate without requiring a single hub."""
+    if command_line_root is not None:
+        return [resolve_command_line_root(command_line_root)], []
+    return load_registry(), []
+
+
+def multi_root_registry() -> bool:
+    try:
+        return len(load_registry()) > 1
+    except PlanError:
+        return False
+
+
+def root_validity(path: Path) -> str:
+    if not path.is_dir():
+        return "missing-path"
+    if all((path / required).is_file() for required in HUB_REQUIRED_FILES):
+        return "ok"
+    return "not-a-hub"
 
 
 def normalize_id(value: str) -> str:
@@ -71,12 +207,16 @@ def validate_or_raise(root: Path, *required_ids: str) -> None:
             errors.append(f"ambiguous unmanaged input: {item['message']}")
     validation_errors, base_plans, invalid_ids = validator.validation_state(root)
     managed_ids = set(base_plans) - invalid_ids
+    unknown = [plan_id for plan_id in required_ids if plan_id not in managed_ids]
     for plan_id in required_ids:
         if plan_id not in managed_ids:
             relevant = [message for message in validation_errors if plan_id in message]
             errors.extend(relevant or [f"Plan {plan_id!r} is not valid managed state"])
     if errors:
-        raise PlanError("Repository validation failed:\n- " + "\n- ".join(dict.fromkeys(errors)))
+        message = "Repository validation failed:\n- " + "\n- ".join(dict.fromkeys(errors))
+        if unknown:
+            raise UnknownPlanIDError(message, plan_id=unknown[0])
+        raise PlanError(message)
 
 
 def load(
@@ -194,6 +334,84 @@ def command_validate(root: Path, _args: argparse.Namespace) -> None:
     print(f"Plan storage validation passed: {root}")
 
 
+def command_roots(roots: list[RootRef], warnings: list[str], args: argparse.Namespace) -> None:
+    entries = [
+        {"name": root.name, "path": str(root.path), "source": root.source, "validity": root_validity(root.path)}
+        for root in roots
+    ]
+    if args.json:
+        print(json.dumps({"schema_version": 1, "roots": entries, "warnings": warnings}, indent=2, sort_keys=True))
+    else:
+        if not entries:
+            print(f"No plan hubs configured; create a roots registry at {registry_path()}")
+        for entry in entries:
+            print(f"{entry['name'] or '—'}\t{entry['path']}\t{entry['source']}\t{entry['validity']}")
+    for warning in warnings:
+        print(f"planctl: warning: {warning}", file=sys.stderr)
+
+
+def command_locate(roots: list[RootRef], warnings: list[str], args: argparse.Namespace) -> None:
+    """Read-only cross-root lookup; every outcome is a result, never a failure."""
+    plan_id = normalize_id(args.id)
+    warnings = list(warnings)
+    hits: list[dict[str, object]] = []
+    searched: list[dict[str, object]] = []
+    for root in roots:
+        label = root.name or str(root.path)
+        validity = root_validity(root.path)
+        if validity != "ok":
+            warnings.append(f"skipped root {label}: {validity} ({root.path})")
+            continue
+        report = validator.scan(root.path)
+        searched.append({"name": root.name, "path": str(root.path), "source": root.source})
+        for item in report["diagnostics"]:
+            if item["code"] == "ambiguous-plan-id" and item.get("plan_id") == plan_id:
+                warnings.append(f"{label}: [{item['code']}] {item['message']}")
+        for item in report["managed_plans"]:
+            if item["id"] == plan_id:
+                hits.append({
+                    "root": root.name,
+                    "hub": str(root.path),
+                    "project": item["project"],
+                    "status": item["status"],
+                    "plan_path": str(root.path / str(item["path"])),
+                })
+    if len(hits) == 1:
+        result = "unique"
+    elif hits:
+        result = "ambiguous"
+    else:
+        result = "not-found"
+    if args.json:
+        payload = {
+            "schema_version": 1,
+            "id": plan_id,
+            "result": result,
+            "hits": hits,
+            "searched": searched,
+            "warnings": warnings,
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Result: {result}")
+        print(f"ID: {plan_id}")
+        if result == "unique":
+            hit = hits[0]
+            print(f"Hub: {hit['root'] or '—'} ({hit['hub']})")
+            print(f"Project: {hit['project']}")
+            print(f"Status: {hit['status']}")
+            print(f"Path: {hit['plan_path']}")
+        elif result == "ambiguous":
+            print("Hits:")
+            for hit in hits:
+                print(f"- {hit['root'] or '—'} ({hit['hub']}): {hit['project']} {hit['status']} {hit['plan_path']}")
+        else:
+            names = ", ".join(str(entry["name"] or entry["path"]) for entry in searched) or "none"
+            print(f"Searched hubs: {names}")
+    for warning in warnings:
+        print(f"planctl: warning: {warning}", file=sys.stderr)
+
+
 def command_scan(root: Path, args: argparse.Namespace) -> None:
     report = validator.scan(root)
     if args.json:
@@ -300,7 +518,7 @@ def command_show(root: Path, args: argparse.Namespace) -> None:
     validate_or_raise(root, plan_id)
     _, entries, _, plans = load(root)
     if plan_id not in plans:
-        raise PlanError(f"Unknown plan ID: {plan_id}")
+        raise UnknownPlanIDError(f"Unknown plan ID: {plan_id}", plan_id=plan_id)
     plan = plans[plan_id]
     entry = entries[plan_id]
     dependencies = ", ".join(entry["dependencies"]) or "—"
@@ -401,7 +619,7 @@ def command_release(root: Path, args: argparse.Namespace) -> None:
         validate_or_raise(root, plan_id)
         _, entries, _, plans = load(root)
         if plan_id not in plans or plan_id not in entries:
-            raise PlanError(f"Unknown plan ID: {plan_id}")
+            raise UnknownPlanIDError(f"Unknown plan ID: {plan_id}", plan_id=plan_id)
         if empty(str(entries[plan_id]["claimed_by"])):
             raise PlanError(f"{plan_id} has no active claim")
         original = (root / "ORCHESTRATION.md").read_text(encoding="utf-8")
@@ -424,7 +642,7 @@ def command_depends(root: Path, args: argparse.Namespace) -> None:
         validate_or_raise(root, plan_id)
         _, entries, _, plans = load(root)
         if plan_id not in plans:
-            raise PlanError(f"Unknown plan ID: {plan_id}")
+            raise UnknownPlanIDError(f"Unknown plan ID: {plan_id}", plan_id=plan_id)
         plan = plans[plan_id]
         entry = entries[plan_id]
         status = str(plan["status"])
@@ -459,7 +677,7 @@ def command_status(root: Path, args: argparse.Namespace) -> None:
         validate_or_raise(root, plan_id)
         _, entries, _, plans = load(root)
         if plan_id not in plans:
-            raise PlanError(f"Unknown plan ID: {plan_id}")
+            raise UnknownPlanIDError(f"Unknown plan ID: {plan_id}", plan_id=plan_id)
         plan = plans[plan_id]
         current = str(plan["status"])
         if target not in transitions[current]:
@@ -501,13 +719,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--root",
         type=Path,
-        help="plan-hub checkout (overrides PLANS_ROOT; never defaults to the client checkout)",
+        help=(
+            "plan-hub checkout path or configured root name "
+            "(never defaults to the client checkout)"
+        ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("init").set_defaults(handler=command_init)
     commands.add_parser("validate").set_defaults(handler=command_validate)
     commands.add_parser("list-ready").set_defaults(handler=command_list_ready)
+
+    roots_cmd = commands.add_parser("roots", help="list the effective plan-hub root set")
+    roots_cmd.add_argument("--json", action="store_true", help="emit the versioned structured report")
+    roots_cmd.set_defaults(handler=command_roots)
+
+    locate = commands.add_parser("locate", help="read-only lookup of a plan ID across every configured hub")
+    locate.add_argument("id")
+    locate.add_argument("--json", action="store_true", help="emit the versioned structured report")
+    locate.set_defaults(handler=command_locate)
 
     scan = commands.add_parser("scan", help="read-only inventory of managed and unmanaged datastore input")
     scan.add_argument("--json", action="store_true", help="emit the versioned structured report")
@@ -555,12 +785,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+ROOT_SET_COMMANDS = {"roots", "locate"}
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
-        root = configured_root(args.root)
-        args.handler(root, args)
+        if args.command in ROOT_SET_COMMANDS:
+            roots, warnings = effective_roots(args.root)
+            args.handler(roots, warnings, args)
+        else:
+            root = configured_root(args.root)
+            args.handler(root, args)
+    except UnknownPlanIDError as error:
+        print(f"planctl: {error}", file=sys.stderr)
+        if error.plan_id and multi_root_registry():
+            print(
+                f"planctl: hint: run 'planctl locate {error.plan_id}' to search all configured hubs",
+                file=sys.stderr,
+            )
+        return 1
     except (PlanError, ValueError) as error:
         print(f"planctl: {error}", file=sys.stderr)
         return 1
