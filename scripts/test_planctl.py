@@ -871,6 +871,56 @@ class PlanctlTest(unittest.TestCase):
         self.assertEqual([], scan["managed_plans"])
 
 
+    def test_research_allocation_supports_scopes_without_creating_a_plan(self) -> None:
+        research_one = "RES" + "-001"
+        research_two = "RES" + "-002"
+        research_three = "RES" + "-003"
+        project = self.run_cli(
+            "research", "allocate", "--scope", "project", "--project", "demo-project",
+            "--title", "Checkout flow investigation",
+        )
+        self.assertEqual([research_one, str((self.root / "research" / ("open--" + research_one + "--checkout-flow-investigation.md")).resolve())], project.stdout.splitlines())
+        self.assertTrue((self.root / "RESEARCH.md").is_file())
+        self.assertFalse((self.root / "demo-project").exists())
+        cross = self.run_cli("research", "allocate", "--scope", "cross-project", "--title", "Authentication options")
+        self.assertIn(research_two, cross.stdout)
+        unknown = self.run_cli("research", "allocate", "--scope", "unknown", "--title", "API investigation")
+        self.assertIn(research_three, unknown.stdout)
+        report = json.loads(self.run_cli("scan", "--json").stdout)
+        self.assertEqual([], report["managed_plans"])
+        self.assertEqual([research_one, research_two, research_three], [item["id"] for item in report["managed_research"]])
+
+    def test_research_conversion_records_both_backlinks_and_retains_record(self) -> None:
+        research_id = "RES" + "-001"
+        self.run_cli(
+            "research", "allocate", "project", "demo-project", "checkout-investigation",
+        )
+        allocated = self.run_cli("allocate", "DEMO", "checkout", "--from-research", research_id)
+        self.assertIn("DEMO-001", allocated.stdout)
+        self.assertIn(research_id, allocated.stdout)
+        plan = self.root / "demo-project" / "planning--DEMO-001--checkout.md"
+        self.assertIn("Research: " + research_id, plan.read_text(encoding="utf-8"))
+        research = self.root / "research" / ("converted--" + research_id + "--checkout-investigation.md")
+        self.assertTrue(research.is_file())
+        self.assertIn("Linked Plans: DEMO-001", research.read_text(encoding="utf-8"))
+        self.run_cli("validate")
+        self.run_cli("research", "link", research_id, "DEMO-001")
+        self.assertEqual(1, self.run_cli("scan", "--json").stdout.count('"id": "' + research_id + '"'))
+
+    def test_research_cancel_rejects_linked_record_and_plan_operations_ignore_raw_research(self) -> None:
+        research_id = "RES" + "-001"
+        self.run_cli("research", "allocate", "project", "demo-project", "investigation")
+        self.run_cli("allocate", "DEMO", "existing")
+        self.run_cli("research", "link", research_id, "DEMO-001")
+        rejected = self.run_cli("research", "status", research_id, "cancelled", succeeds=False)
+        self.assertIn("Cannot cancel", rejected.stderr)
+        # An unrelated malformed research file is scoped to research operations;
+        # existing plan readiness remains usable.
+        (self.root / "research" / "draft.md").write_text("ID: " + "RES" + "-999\n", encoding="utf-8")
+        self.run_cli("status", "DEMO-001", "ready")
+        self.run_cli("ready", "DEMO-001")
+
+
 class MultiRootTest(unittest.TestCase):
     """Multi-root registry, roots/locate commands, and root-selection precedence."""
 

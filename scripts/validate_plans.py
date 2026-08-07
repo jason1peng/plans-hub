@@ -12,10 +12,18 @@ from pathlib import Path
 STATUS_RE = re.compile(
     r"^(planning|ready|verifying|done)--([A-Z][A-Z0-9]*-[0-9]{3,})--([a-z0-9]+(?:-[a-z0-9]+)*)\.md$"
 )
+RESEARCH_STATUS_RE = re.compile(
+    r"^(open|converted|cancelled|archived)--(RES-[0-9]{3,})--([a-z0-9]+(?:-[a-z0-9]+)*)\.md$"
+)
 ID_RE = re.compile(r"^([A-Z][A-Z0-9]*)-([0-9]{3,})$")
+RESEARCH_ID_RE = re.compile(r"^RES-[0-9]{3,}$")
 PROJECT_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 EMPTY_VALUES = {"", "—", "-", "none"}
-RESERVED_DIRS = {"scripts", "skills"}
+# ``research`` is deliberately not a project folder.  Keeping it here makes
+# the reservation apply to every plan scan, including older hubs that have no
+# RESEARCH.md yet.
+RESERVED_DIRS = {"scripts", "skills", "research"}
+RESEARCH_REGISTRY = "RESEARCH.md"
 STALE_PRIVATE_CLIENT_PATH = "scripts/planctl.py"
 
 
@@ -68,6 +76,8 @@ def parse_registry(
         prefix, project = map(clean_cell, cells)
         if not re.fullmatch(r"[A-Z][A-Z0-9]*", prefix):
             errors.append(f"{path.name}:{line}: invalid prefix {prefix!r}")
+        if prefix == "RES":
+            errors.append(f"{path.name}:{line}: prefix 'RES' is reserved for research IDs")
         if not PROJECT_RE.fullmatch(project):
             errors.append(f"{path.name}:{line}: invalid project folder {project!r}")
         if prefix in prefixes:
@@ -132,6 +142,335 @@ def find_plan_candidates(root: Path) -> dict[str, list[dict[str, object]]]:
 def metadata_values(text: str, field: str) -> list[str]:
     """Return every top-level metadata value for a managed contract field."""
     return re.findall(rf"(?m)^{re.escape(field)}:\s*(.*?)\s*$", text)
+
+
+def research_metadata_values(text: str, field: str) -> list[str]:
+    """Return research metadata, accepting the early public spellings too."""
+    aliases = {
+        "ID": ("ID", "Research ID"),
+        "Status": ("Status",),
+        "Scope": ("Scope",),
+        "Projects": ("Projects", "Project"),
+        "Linked Plans": ("Linked Plans", "Linked plans", "Plans"),
+        "Path": ("Path",),
+    }
+    fields = aliases.get(field, (field,))
+    values: list[str] = []
+    for candidate in fields:
+        values.extend(metadata_values(text, candidate))
+    return values
+
+
+def _research_table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def parse_research_registry(
+    path: Path, errors: list[str]
+) -> tuple[dict[str, dict[str, object]], dict[str, str]]:
+    """Read the optional RESEARCH.md registry without activating raw records."""
+    if not path.exists():
+        return {}, {}
+    if not path.is_file():
+        errors.append(f"Cannot read {path.name}: path is not a file")
+        return {}, {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        errors.append(f"Cannot read {path.name}: {error}")
+        return {}, {}
+
+    entries: dict[str, dict[str, object]] = {}
+    retired: dict[str, str] = {}
+    section: str | None = None
+    saw_records = False
+    saw_retired = False
+    for line_number, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            if "research" in stripped[2:].strip().lower():
+                section = "records"
+                saw_records = True
+            else:
+                section = None
+            continue
+        if stripped.startswith("## "):
+            heading = stripped[3:].strip().lower()
+            if "retired" in heading and "research" in heading:
+                section = "retired"
+                saw_retired = True
+            elif "research" in heading and (
+                heading == "research" or any(word in heading for word in ("record", "registry", "managed"))
+            ):
+                section = "records"
+                saw_records = True
+            else:
+                section = None
+            continue
+        if section is None or not line.lstrip().startswith("|"):
+            continue
+        cells = _research_table_cells(line)
+        if not cells or all(set(cell) <= {"-", ":", " "} for cell in cells):
+            continue
+        first = clean_cell(cells[0]).lower()
+        if first in {"id", "research id", "research-id"}:
+            continue
+        if section == "records":
+            if len(cells) != 6:
+                errors.append(f"{path.name}:{line_number}: expected 6 research registry columns")
+                continue
+            research_id, status, scope, projects, linked_plans, record_path = map(clean_cell, cells)
+            if not RESEARCH_ID_RE.fullmatch(research_id):
+                errors.append(f"{path.name}:{line_number}: invalid research ID {research_id!r}")
+            if research_id in entries:
+                errors.append(f"{path.name}:{line_number}: duplicate research ID {research_id!r}")
+                continue
+            entries[research_id] = {
+                "id": research_id,
+                "status": status,
+                "scope": scope,
+                "projects": split_values(projects),
+                "linked_plans": split_values(linked_plans),
+                "path": record_path,
+                "line": line_number,
+            }
+        elif section == "retired":
+            if len(cells) not in {1, 2}:
+                errors.append(f"{path.name}:{line_number}: expected 1 or 2 retired research columns")
+                continue
+            research_id = clean_cell(cells[0])
+            if not RESEARCH_ID_RE.fullmatch(research_id):
+                errors.append(f"{path.name}:{line_number}: invalid retired research ID {research_id!r}")
+            if research_id in retired:
+                errors.append(f"{path.name}:{line_number}: duplicate retired research ID {research_id!r}")
+            retired[research_id] = clean_cell(cells[1]) if len(cells) == 2 else ""
+    if not saw_records:
+        errors.append(f"{path.name} is missing a managed research records section")
+    if not saw_retired:
+        # Retired IDs are optional for compatibility with hand-written registries;
+        # allocation still considers all records and files.  The synthetic
+        # template includes this section so new hubs get the complete contract.
+        pass
+    return entries, retired
+
+
+def find_research_candidates(root: Path) -> dict[str, list[dict[str, object]]]:
+    """Return syntactically named research files, without activating raw input."""
+    candidates: dict[str, list[dict[str, object]]] = {}
+    directory = root / "research"
+    if not directory.is_dir():
+        return candidates
+    for record_file in sorted(directory.glob("*.md")):
+        match = RESEARCH_STATUS_RE.fullmatch(record_file.name)
+        if not match:
+            continue
+        status, research_id, slug = match.groups()
+        candidates.setdefault(research_id, []).append({
+            "status": status,
+            "id": research_id,
+            "name": slug,
+            "path": record_file,
+            "text": record_file.read_text(encoding="utf-8"),
+        })
+    return candidates
+
+
+def _research_record_metadata(
+    record: dict[str, object], prefixes: dict[str, str]
+) -> tuple[dict[str, object], list[str]]:
+    """Parse and validate one record's intrinsic metadata."""
+    text = str(record["text"])
+    research_id = str(record["id"])
+    status = str(record["status"])
+    errors: list[str] = []
+    values: dict[str, object] = {
+        "id": research_id,
+        "status": status,
+        "scope": "",
+        "projects": [],
+        "linked_plans": [],
+        "path": str(Path(str(record["path"])).as_posix()),
+        "name": str(record["name"]),
+        "text": text,
+    }
+    id_values = research_metadata_values(text, "ID")
+    status_values = research_metadata_values(text, "Status")
+    scope_values = research_metadata_values(text, "Scope")
+    project_values = research_metadata_values(text, "Projects")
+    linked_values = research_metadata_values(text, "Linked Plans")
+    path_values = research_metadata_values(text, "Path")
+    if id_values != [research_id]:
+        errors.append(f"Research {research_id!r} must have exactly one matching ID field")
+    if status_values != [status]:
+        errors.append(f"Research {research_id!r} must have exactly one matching Status field")
+    if scope_values != [scope_values[0] if scope_values else ""]:
+        errors.append(f"Research {research_id!r} must have exactly one Scope field")
+    scope = clean_cell(scope_values[0]) if len(scope_values) == 1 else ""
+    values["scope"] = scope
+    if scope not in {"project", "cross-project", "unknown"}:
+        errors.append(f"Research {research_id!r} has invalid scope {scope!r}")
+    projects = split_values(project_values[0]) if len(project_values) == 1 else []
+    if len(project_values) != 1:
+        errors.append(f"Research {research_id!r} must have exactly one Projects field")
+    values["projects"] = projects
+    if scope == "project":
+        if len(projects) != 1 or not PROJECT_RE.fullmatch(projects[0]):
+            errors.append(f"Research {research_id!r} project scope requires one lowercase project")
+        elif projects[0] not in set(prefixes.values()):
+            errors.append(f"Research {research_id!r} uses unknown project {projects[0]!r}")
+    elif projects:
+        errors.append(f"Research {research_id!r} scope {scope!r} must not list projects")
+    linked_plans = split_values(linked_values[0]) if len(linked_values) == 1 else []
+    if len(linked_values) != 1:
+        errors.append(f"Research {research_id!r} must have exactly one Linked Plans field")
+    if len(linked_plans) != len(set(linked_plans)):
+        errors.append(f"Research {research_id!r} lists a linked plan more than once")
+    invalid_links = [plan_id for plan_id in linked_plans if not ID_RE.fullmatch(plan_id)]
+    if invalid_links:
+        errors.append(f"Research {research_id!r} has invalid linked plan ID(s): {', '.join(invalid_links)}")
+    values["linked_plans"] = linked_plans
+    expected_relative = f"research/{Path(str(record['path'])).name}"
+    if path_values != [expected_relative]:
+        errors.append(f"Research {research_id!r} must have Path: {expected_relative}")
+    values["path"] = expected_relative
+    if status == "open" and linked_plans:
+        errors.append(f"Open research {research_id!r} must not have linked plans")
+    if status == "converted" and not linked_plans:
+        errors.append(f"Converted research {research_id!r} must list at least one linked plan")
+    if status == "cancelled" and linked_plans:
+        errors.append(f"Cancelled research {research_id!r} must not have linked plans")
+    return values, errors
+
+
+def research_validation_state(
+    root: Path,
+    prefixes: dict[str, str] | None = None,
+    plan_entries: dict[str, dict[str, object]] | None = None,
+    plans: dict[str, dict[str, object]] | None = None,
+) -> tuple[list[str], dict[str, dict[str, object]], dict[str, dict[str, object]], set[str]]:
+    """Validate the optional research namespace and return valid records."""
+    errors: list[str] = []
+    records: dict[str, dict[str, object]] = {}
+    invalid_ids: set[str] = set()
+    if not root.is_dir():
+        return [f"Plans root is not a directory: {root}"], {}, {}, invalid_ids
+    if prefixes is None:
+        registry_errors: list[str] = []
+        prefixes, _, _ = parse_registry(root / "ORCHESTRATION.md", registry_errors)
+        errors.extend(registry_errors)
+    registry_path = root / RESEARCH_REGISTRY
+    candidates = find_research_candidates(root)
+    registry_entries: dict[str, dict[str, object]] = {}
+    retired: dict[str, str] = {}
+    registry_invalid = False
+    if registry_path.exists():
+        registry_errors: list[str] = []
+        registry_entries, retired = parse_research_registry(registry_path, registry_errors)
+        errors.extend(registry_errors)
+        registry_invalid = bool(registry_errors)
+    elif candidates:
+        errors.append("Missing RESEARCH.md for managed research records")
+
+    for research_id, matches in sorted(candidates.items()):
+        if len(matches) != 1:
+            paths = ", ".join(str(item["path"].relative_to(root)) for item in matches)
+            errors.append(f"Research ID {research_id!r} has multiple files: {paths}")
+            invalid_ids.add(research_id)
+            continue
+        record, intrinsic_errors = _research_record_metadata(matches[0], prefixes or {})
+        records[research_id] = record
+        if intrinsic_errors:
+            errors.extend(intrinsic_errors)
+            invalid_ids.add(research_id)
+        entry = registry_entries.get(research_id)
+        if entry is None:
+            errors.append(f"Research {research_id!r} is missing from RESEARCH.md")
+            invalid_ids.add(research_id)
+            continue
+        comparisons = (
+            ("status", "status"),
+            ("scope", "scope"),
+            ("projects", "projects"),
+            ("linked_plans", "linked_plans"),
+            ("path", "path"),
+        )
+        for field, label in comparisons:
+            if entry[field] != record[field]:
+                errors.append(f"Research registry mismatch for {research_id!r}: {label}")
+                invalid_ids.add(research_id)
+    for research_id, entry in registry_entries.items():
+        if research_id not in candidates:
+            errors.append(f"Research registry entry has no file: {research_id}")
+
+    if registry_invalid:
+        invalid_ids.update(candidates)
+    duplicate_ids = {research_id for research_id, matches in candidates.items() if len(matches) > 1}
+    for research_id in sorted(duplicate_ids):
+        errors.append(f"Ambiguous research ID {research_id!r}: duplicate research files")
+    for research_id in sorted(retired):
+        if research_id in registry_entries or research_id in candidates:
+            errors.append(f"Retired research ID has an active record: {research_id}")
+            invalid_ids.add(research_id)
+
+    # Cross-link checks are intentionally only applied when the caller supplied
+    # the current plan view.  Standalone scan still reports intrinsic research
+    # state, while plan operations can validate one requested relationship.
+    if plan_entries is not None:
+        for research_id, record in records.items():
+            if research_id in invalid_ids:
+                continue
+            for plan_id in record["linked_plans"]:
+                if plan_id not in plan_entries:
+                    errors.append(f"Research {research_id!r} links unknown plan {plan_id!r}")
+                    invalid_ids.add(research_id)
+                elif plans is not None and plan_id in plans:
+                    linked_plan = plans[plan_id]
+                    if (
+                        record["scope"] == "project"
+                        and str(linked_plan["project"]) not in record["projects"]
+                    ):
+                        errors.append(
+                            f"Project-scoped research {research_id!r} cannot link plan {plan_id!r} "
+                            f"from project {linked_plan['project']!r}"
+                        )
+                        invalid_ids.add(research_id)
+                    sources = plan_research_ids(str(linked_plan["text"]))
+                    if research_id not in sources:
+                        errors.append(f"Research {research_id!r} is missing backlink from plan {plan_id!r}")
+                        invalid_ids.add(research_id)
+        if plans is not None:
+            for plan_id, plan in plans.items():
+                source_ids = plan_research_ids(str(plan["text"]))
+                for research_id in source_ids:
+                    if research_id not in records:
+                        errors.append(f"Plan {plan_id!r} links unknown research {research_id!r}")
+                        continue
+                    if research_id in invalid_ids:
+                        continue
+                    record = records[research_id]
+                    if (
+                        record["scope"] == "project"
+                        and plan_id in plans
+                        and str(plans[plan_id]["project"]) not in record["projects"]
+                    ):
+                        errors.append(
+                            f"Project-scoped research {research_id!r} cannot link plan {plan_id!r} "
+                            f"from project {plans[plan_id]['project']!r}"
+                        )
+                        invalid_ids.add(plan_id)
+                        continue
+                    if plan_id not in record["linked_plans"]:
+                        errors.append(f"Plan {plan_id!r} is missing backlink in research {research_id!r}")
+    return errors, records, registry_entries, invalid_ids
+
+
+def plan_research_ids(text: str) -> list[str]:
+    """Parse optional source-research metadata from an implementation plan."""
+    values: list[str] = []
+    for field in ("Research", "Research IDs", "Source Research"):
+        for value in metadata_values(text, field):
+            values.extend(split_values(value))
+    return values
 
 
 def find_plans(
@@ -255,8 +594,16 @@ def detect_cycles(
         visit(plan_id, [])
 
 
-def _diagnostic(code: str, message: str, *, path: str | None = None, plan_id: str | None = None,
-                severity: str = "error", repair: str = "unsupported") -> dict[str, object]:
+def _diagnostic(
+    code: str,
+    message: str,
+    *,
+    path: str | None = None,
+    plan_id: str | None = None,
+    research_id: str | None = None,
+    severity: str = "error",
+    repair: str = "unsupported",
+) -> dict[str, object]:
     item: dict[str, object] = {
         "code": code,
         "severity": severity,
@@ -267,6 +614,8 @@ def _diagnostic(code: str, message: str, *, path: str | None = None, plan_id: st
         item["path"] = path
     if plan_id is not None:
         item["plan_id"] = plan_id
+    if research_id is not None:
+        item["research_id"] = research_id
     return item
 
 
@@ -275,6 +624,8 @@ def scan(root: Path) -> dict[str, object]:
     diagnostics: list[dict[str, object]] = []
     unmanaged: list[dict[str, object]] = []
     managed: list[dict[str, object]] = []
+    managed_research: list[dict[str, object]] = []
+    unmanaged_research: list[dict[str, object]] = []
     projects: list[str] = []
     if not root.is_dir():
         return {
@@ -282,7 +633,9 @@ def scan(root: Path) -> dict[str, object]:
             "root": str(root),
             "projects": [],
             "managed_plans": [],
+            "managed_research": [],
             "unmanaged_files": [],
+            "unmanaged_research": [],
             "diagnostics": [_diagnostic("root-not-directory", f"Plans root is not a directory: {root}")],
             "clean": False,
         }
@@ -469,6 +822,10 @@ def scan(root: Path) -> dict[str, object]:
             ))
 
     code_rules = (
+        ("multiple research files", "duplicate-research-id"),
+        ("Ambiguous research ID", "ambiguous-research-id"),
+        ("duplicate research ID", "duplicate-research-id"),
+        ("Research ID ", "duplicate-research-id"),
         ("matching ID field", "metadata-id-mismatch"),
         ("matching Status field", "lifecycle-mismatch"),
         ("missing or inconsistent ID", "metadata-id-mismatch"),
@@ -481,8 +838,45 @@ def scan(root: Path) -> dict[str, object]:
         ("claim", "invalid-claim"),
         ("findings", "findings-lifecycle"),
         ("Findings", "findings-lifecycle"),
+        ("Research registry mismatch", "research-registry-mismatch"),
+        ("registry entry has no file", "stale-research-registry-row"),
+        ("Missing RESEARCH.md", "missing-research-registry"),
+        ("missing from RESEARCH.md", "missing-research-registry-row"),
+        ("RESEARCH.md", "research-registry"),
+        ("invalid scope", "research-scope"),
+        ("project scope", "research-scope"),
+        ("scope ", "research-scope"),
+        ("linked plan", "research-link"),
+        ("lists source research", "research-link"),
+        ("invalid source research", "research-link"),
+        ("Research ", "research-contract"),
     )
-    validation_errors, _, invalid_ids = validation_state(root)
+    validation_errors, base_plans, invalid_ids = validation_state(root, include_research=False)
+    research_errors, research_records, research_entries, research_invalid = research_validation_state(
+        root, prefixes, entries, base_plans
+    )
+    validation_errors.extend(research_errors)
+    for plan_id, plan in base_plans.items():
+        source_ids = plan_research_ids(str(plan["text"]))
+        if len(source_ids) != len(set(source_ids)):
+            validation_errors.append(f"Plan {plan_id!r} lists source research more than once")
+            invalid_ids.add(plan_id)
+        malformed_sources = [source_id for source_id in source_ids if not RESEARCH_ID_RE.fullmatch(source_id)]
+        if malformed_sources:
+            validation_errors.append(
+                f"Plan {plan_id!r} has invalid source research ID(s): {', '.join(malformed_sources)}"
+            )
+            invalid_ids.add(plan_id)
+        for research_id in source_ids:
+            if research_id not in research_records:
+                validation_errors.append(f"Plan {plan_id!r} links unknown research {research_id!r}")
+                invalid_ids.add(plan_id)
+            elif research_id in research_invalid:
+                validation_errors.append(f"Plan {plan_id!r} links invalid research {research_id!r}")
+                invalid_ids.add(plan_id)
+            elif plan_id not in research_records[research_id]["linked_plans"]:
+                validation_errors.append(f"Plan {plan_id!r} is missing backlink in research {research_id!r}")
+                invalid_ids.add(plan_id)
     if invalid_ids:
         kept = []
         for item in managed:
@@ -503,14 +897,122 @@ def scan(root: Path) -> dict[str, object]:
             if fragment in message:
                 code = candidate
                 break
-        diagnostics.append(_diagnostic(code, message, repair="approval-required"))
+        research_match = re.search(r"['\"](RES-[0-9]{3,})['\"]", message)
+        if research_match is None:
+            research_match = re.search(r"(?:Research(?: ID)?|research(?: ID)?)\s+(RES-[0-9]{3,})", message)
+        diagnostics.append(_diagnostic(
+            code,
+            message,
+            research_id=research_match.group(1) if research_match else None,
+            repair="approval-required",
+        ))
+
+    # Research is a separate namespace in scan output.  Invalid records stay
+    # visible as unmanaged input and never become plan IDs or ready work.
+    candidate_paths: set[str] = set()
+    for research_id, matches in sorted(find_research_candidates(root).items()):
+        for match in matches:
+            relative = str(Path(str(match["path"])).relative_to(root))
+            candidate_paths.add(relative)
+            if research_id not in research_records or research_id in research_invalid:
+                unmanaged_research.append({
+                    "path": relative,
+                    "observed_id": research_id,
+                    "reason": "research record failed managed-state validation",
+                })
+            else:
+                record = research_records[research_id]
+                managed_research.append({
+                    "id": research_id,
+                    "research_id": research_id,
+                    "status": record["status"],
+                    "scope": record["scope"],
+                    "projects": record["projects"],
+                    "linked_plans": record["linked_plans"],
+                    "name": record["name"],
+                    "path": relative,
+                })
+    research_dir = root / "research"
+    if research_dir.is_dir():
+        for path in sorted(research_dir.glob("*.md")):
+            relative = str(path.relative_to(root))
+            if relative in candidate_paths:
+                continue
+            text = path.read_text(encoding="utf-8")
+            observed = research_metadata_values(text, "ID")
+            observed_id = observed[0] if len(observed) == 1 and RESEARCH_ID_RE.fullmatch(observed[0]) else None
+            if observed and any(not RESEARCH_ID_RE.fullmatch(value) for value in observed):
+                diagnostics.append(_diagnostic(
+                    "malformed-research-id",
+                    f"Invalid research metadata ID(s): {', '.join(observed)}",
+                    path=relative,
+                    research_id=observed_id,
+                    repair="approval-required",
+                ))
+            unmanaged_research.append({
+                "path": relative,
+                **({"observed_id": observed_id} if observed_id else {}),
+                "reason": "filename is outside managed research contract",
+            })
+            diagnostics.append(_diagnostic(
+                "unmanaged-research-file",
+                "Markdown input is inactive because its filename does not satisfy the managed-research contract",
+                path=relative,
+                research_id=observed_id,
+                severity="warning",
+                repair="approval-required",
+            ))
+
+    # A raw RES ID is ambiguous for research mutations even when it lives in a
+    # non-research Markdown file.  It is intentionally not included in the
+    # managed record inventory.
+    raw_research_mentions: dict[str, list[str]] = {}
+    managed_plan_paths = {str(item["path"]) for item in managed}
+    managed_research_paths = {
+        str(record["path"])
+        for research_id, record in research_records.items()
+        if research_id not in research_invalid
+    }
+    candidate_ids_by_path: dict[str, set[str]] = {}
+    for research_id, matches in find_research_candidates(root).items():
+        for candidate in matches:
+            candidate_path = str(Path(str(candidate["path"])).relative_to(root))
+            candidate_ids_by_path.setdefault(candidate_path, set()).add(research_id)
+    for path in sorted(root.rglob("*.md")):
+        relative_path = str(path.relative_to(root))
+        if ".git" in path.relative_to(root).parts or path == root / RESEARCH_REGISTRY:
+            continue
+        # Only valid managed records are exempt from raw-ID ambiguity checks.
+        # A syntactically named but unregistered/invalid file is still raw input
+        # and must not be able to smuggle an active RES ID into a mutation.
+        if relative_path in managed_plan_paths or relative_path in managed_research_paths:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for value in research_metadata_values(text, "ID") + research_metadata_values(text, "Research"):
+            for research_id in split_values(value):
+                if not RESEARCH_ID_RE.fullmatch(research_id):
+                    continue
+                if research_id in candidate_ids_by_path.get(relative_path, set()):
+                    continue
+                raw_research_mentions.setdefault(research_id, []).append(relative_path)
+    for research_id, paths in sorted(raw_research_mentions.items()):
+        if research_id in research_entries or len(paths) > 1:
+            unique_paths = ", ".join(sorted(set(paths)))
+            diagnostics.append(_diagnostic(
+                "ambiguous-research-id",
+                f"Unmanaged input mentions active or duplicate research ID {research_id}: {unique_paths}",
+                research_id=research_id,
+                repair="approval-required",
+            ))
 
     return {
         "schema_version": 1,
         "root": str(root),
         "projects": projects,
         "managed_plans": managed,
+        "managed_research": sorted(managed_research, key=lambda item: str(item["id"])),
         "unmanaged_files": unmanaged,
+        "unmanaged_research": unmanaged_research,
         "diagnostics": diagnostics,
         "clean": not diagnostics,
     }
@@ -523,11 +1025,15 @@ def policy_errors(root: Path) -> list[str]:
     for item in report["diagnostics"]:
         if item["code"] == "ambiguous-plan-id":
             errors.append(f"ambiguous unmanaged input: {item['message']}")
+        elif item["code"] in {"ambiguous-research-id", "duplicate-research-id"}:
+            errors.append(f"ambiguous unmanaged research input: {item['message']}")
     return errors
 
 
 def validation_state(
     root: Path,
+    *,
+    include_research: bool = True,
 ) -> tuple[list[str], dict[str, dict[str, object]], set[str]]:
     """Validate active state and identify registered plans unsafe to expose as managed."""
     errors: list[str] = []
@@ -634,6 +1140,33 @@ def validation_state(
                 )
                 invalid_ids.add(plan_id)
                 changed = True
+
+    if include_research:
+        research_errors, research_records, _research_entries, research_invalid = research_validation_state(
+            root, prefixes, entries, plans
+        )
+        errors.extend(research_errors)
+        for plan_id, plan in plans.items():
+            source_ids = plan_research_ids(str(plan["text"]))
+            if len(source_ids) != len(set(source_ids)):
+                errors.append(f"Plan {plan_id!r} lists source research more than once")
+                invalid_ids.add(plan_id)
+            malformed_sources = [source_id for source_id in source_ids if not RESEARCH_ID_RE.fullmatch(source_id)]
+            if malformed_sources:
+                errors.append(f"Plan {plan_id!r} has invalid source research ID(s): {', '.join(malformed_sources)}")
+                invalid_ids.add(plan_id)
+            for research_id in source_ids:
+                if research_id not in research_records:
+                    # Keep the research diagnostic scoped, but a plan that
+                    # explicitly declares a missing source is not managed.
+                    errors.append(f"Plan {plan_id!r} links unknown research {research_id!r}")
+                    invalid_ids.add(plan_id)
+                elif research_id in research_invalid:
+                    errors.append(f"Plan {plan_id!r} links invalid research {research_id!r}")
+                    invalid_ids.add(plan_id)
+                elif plan_id not in research_records[research_id]["linked_plans"]:
+                    errors.append(f"Plan {plan_id!r} is missing backlink in research {research_id!r}")
+                    invalid_ids.add(plan_id)
     return errors, plans, invalid_ids
 
 
