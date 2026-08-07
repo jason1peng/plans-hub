@@ -176,6 +176,36 @@ class PublicReleaseGuardTest(unittest.TestCase):
         self.assertIn("private plan-state path: RESEARCH.md", result.stderr)
         self.assertNotIn("templates/hub/RESEARCH.md", result.stderr)
 
+    def test_skill_distinguishes_discovery_locations_and_carries_resolved_root(self) -> None:
+        repository = GUARD.parent.parent
+        skill = (repository / "skills" / "shared-plan-storage" / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("Skill location is not storage", skill)
+        self.assertIn("~/.agents/skills/shared-plan-storage", skill)
+        self.assertIn("~/.pi/agent/skills/shared-plan-storage", skill)
+        self.assertIn("~/.config/plans-hub/roots.json", skill)
+        self.assertIn("HUB_ROOT", skill)
+        self.assertIn('planctl --root \"$HUB_ROOT\"', skill)
+        self.assertIn('git -C \"$HUB_ROOT\"', skill)
+        self.assertIn("planctl roots --json", skill)
+        self.assertIn("planctl locate <ID> --json", skill)
+
+    def test_readme_single_hub_agent_examples_carry_resolved_root(self) -> None:
+        repository = GUARD.parent.parent
+        readme = (repository / "README.md").read_text(encoding="utf-8")
+
+        for command in ("validate", "scan", "repair"):
+            self.assertNotRegex(
+                readme,
+                rf"(?m)^\s*(?:scripts/)?planctl(?:\.py)?\s+{command}(?:\s|$)",
+                f"README contains an unflagged agent example for {command}",
+            )
+            self.assertRegex(
+                readme,
+                rf"(?m)^\s*scripts/planctl\.py --root \"\$HUB_ROOT\"\s+{command}(?:\s|$)",
+                f"README is missing a carried HUB_ROOT example for {command}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

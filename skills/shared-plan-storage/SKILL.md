@@ -5,17 +5,32 @@ description: Resolve and maintain implementation plans by stable ID in separatel
 
 # Shared Plan Storage
 
-## Select the hub
+## Skill location is not storage
 
-The public client checkout contains software only. Select private plan-hub checkouts explicitly; never infer plan storage from the installed skill or client location. Multiple hubs may be registered by name in `~/.config/plans-hub/roots.json`; `planctl roots` lists the effective root set with each root's validity.
+The public client checkout and the installed skill contain software and instructions only. Pi/Codex/Claude discovery locations such as `~/.agents/skills/shared-plan-storage`, `~/.pi/agent/skills/shared-plan-storage`, `~/.claude/skills/shared-plan-storage`, and this checkout's `skills/shared-plan-storage/` are **not** plan hubs. Never pass one of those directories (or its parent `skills/` directory) to `--root`, use it as a `git -C` target, or inspect it for plans. Do not infer storage from the current directory, client checkout, skill link, or installation location.
 
-- **Explicit hub mention wins.** If the user names a hub by configured name or path, resolve it with `--root NAME` (or `--root PATH`) and proceed — no prompt, no scan.
-- **Saving a new plan:** run `planctl roots`. If the effective set has more than one valid root and the user did not name a hub, ask which root to use before `planctl allocate`; never default silently. With exactly one root, proceed without asking.
-- **Resolving an existing bare ID:** run `planctl locate <ID>` to scan every configured hub. On `unique`, operate on the returned hub. On `ambiguous`, ask the user which hub. On `not-found`, report the hubs searched.
+A plan hub can only be selected by an explicit `--root PATH|NAME` or by an entry in the fixed roots registry at `~/.config/plans-hub/roots.json`. There is no fallback to the public client checkout and no environment variable selects a hub. `planctl roots` reports configured roots; use its `path` values, not skill-discovery paths, as storage locations.
 
-Single-hub commands resolve exactly one root: `--root PATH|NAME` beats a single-root registry; a multi-root registry never guesses and asks for `--root NAME`. When a bare ID fails in the resolved hub and multiple hubs are configured, planctl suggests `planctl locate <ID>`.
+## Select and carry the hub
 
-Before changing state, read the selected hub's `AGENTS.md`, `README.md`, and `ORCHESTRATION.md`; read `RESEARCH.md` when present before a research mutation. Use `planctl scan` for a read-only inventory; raw or malformed Markdown remains inactive until it satisfies the public client's managed-plan contract. Resolve an existing plan with `planctl show <ID>` and use its returned path. Run `planctl ready <ID>` and claim eligible work before implementation. Do not implement blocked, planning, or claimed work.
+Resolve the hub once, retain its absolute path as `HUB_ROOT`, and pass `--root "$HUB_ROOT"` to **every subsequent single-hub `planctl` command**. Do not drop the flag because a registry currently has one root: a bare command can select a different hub later or fail when multiple roots are configured. The initial root-set commands `planctl roots` and `planctl locate <ID>` are the only discovery exceptions.
+
+- **Explicit hub mention wins.** If the user names a hub by path, set `HUB_ROOT` to that path. If they name a configured root by name, run `planctl roots --json`, select the matching valid entry's absolute `path`, and set `HUB_ROOT` to that value. Proceed without a prompt or cross-root scan.
+- **Saving a new plan:** run `planctl roots --json`. If there is exactly one valid root and the user did not name a hub, set `HUB_ROOT` to that root's absolute `path`. If more than one valid root exists, ask which root to use before allocating; never default silently. With no valid root, require an explicit path or a corrected registry.
+- **Resolving an existing bare ID:** run `planctl locate <ID> --json` to scan every configured hub. On `unique`, set `HUB_ROOT` to the hit's `hub` absolute path. On `ambiguous`, ask the user which hub. On `not-found`, report the hubs searched. Never fetch every hub just because lookup was cross-root.
+
+After `HUB_ROOT` is set, use the same value for all planctl operations, for example:
+
+```sh
+HUB_ROOT=/absolute/path/to/private-hub
+planctl --root "$HUB_ROOT" scan
+planctl --root "$HUB_ROOT" show <ID>
+planctl --root "$HUB_ROOT" ready <ID>
+planctl --root "$HUB_ROOT" claim <ID> agent-name
+planctl --root "$HUB_ROOT" validate
+```
+
+Before changing state, read `$HUB_ROOT/AGENTS.md`, `$HUB_ROOT/README.md`, and `$HUB_ROOT/ORCHESTRATION.md`; read `$HUB_ROOT/RESEARCH.md` when present before a research mutation. Use `planctl --root "$HUB_ROOT" scan` for a read-only inventory; raw or malformed Markdown remains inactive until it satisfies the public client's managed-plan contract. Resolve an existing plan with `planctl --root "$HUB_ROOT" show <ID>` and use its returned path. Run `planctl --root "$HUB_ROOT" ready <ID>` and claim eligible work before implementation. Do not implement blocked, planning, or claimed work.
 
 ## Save durable research before a plan
 
@@ -35,12 +50,12 @@ Append these findings to research `<research-id>`; leave it open.
 Create a plan from research `<research-id>` for `demo-project`.
 ```
 
-Use `planctl research allocate`, `planctl research show`, `planctl research status`, and `planctl research link` for policy-aware operations. A plan created with `--from-research` or an explicit link records both sides of the relationship, changes open research to `converted`, and retains the research path and decision context. Linking is explicit; merely seeing a research file never converts it. Cross-project or unknown research may be converted for a selected project, while project-scoped research must match that project.
+Use `planctl --root "$HUB_ROOT" research allocate`, `planctl --root "$HUB_ROOT" research show`, `planctl --root "$HUB_ROOT" research status`, and `planctl --root "$HUB_ROOT" research link` for policy-aware operations. A plan created with `--from-research` or an explicit link records both sides of the relationship, changes open research to `converted`, and retains the research path and decision context. Linking is explicit; merely seeing a research file never converts it. Cross-project or unknown research may be converted for a selected project, while project-scoped research must match that project.
 
 ## Synchronization and safety
 
 Before lookup or mutation, fetch and fast-forward the private hub's coordination branch. Validate and commit each completed storage change, then push without force. If a push is rejected, fetch and re-evaluate the plan's readiness, dependencies, and claim; do not blindly replay or force-push a claim.
 
-`planctl locate` is a local read-only scan and may be stale: after resolving a hub, fetch and fast-forward the **resolved hub only** before any claim or mutation, exactly as above. Never fetch every hub on each lookup. If `show` or `claim` then fails because the plan moved or disappeared after the sync, re-run `planctl locate <ID>` to rediscover its current location.
+`planctl locate` is a local read-only scan and may be stale: after resolving a hub, fetch and fast-forward the **resolved hub only** before any claim or mutation, exactly as above. Use `git -C "$HUB_ROOT"` for those Git operations. Never fetch every hub on each lookup. If `show` or `claim` then fails because the plan moved or disappeared after the sync, re-run `planctl locate <ID>` to rediscover its current location, then replace `HUB_ROOT` with the newly resolved `hub` path.
 
-Use `planctl init` to bootstrap a synthetic empty hub. Allocation, dependency, claim, release, and lifecycle changes must use `planctl`, followed by validation and a related commit. After creating a plan, include its absolute filesystem path in the result or final response so the user can open it directly; `planctl allocate` prints this absolute path. `planctl repair` is dry-run by default, applies only automatic-safe proposals when explicitly requested, and never commits or pushes; `repair --llm` is a review-only structured handoff. Preserve unrelated work. Before `done`, fold durable findings into the plan, remove the findings directory/link, release the claim, validate, and commit.
+Use `planctl --root "$HUB_ROOT" init` to bootstrap a synthetic empty hub when its path is intentionally new. Allocation, dependency, claim, release, and lifecycle changes must use `planctl --root "$HUB_ROOT"`, followed by validation and a related commit. After creating a plan, include its absolute filesystem path in the result or final response so the user can open it directly; `planctl --root "$HUB_ROOT" allocate` prints this absolute path. `planctl --root "$HUB_ROOT" repair` is dry-run by default, applies only automatic-safe proposals when explicitly requested, and never commits or pushes; `repair --llm` is a review-only structured handoff. Preserve unrelated work. Before `done`, fold durable findings into the plan, remove the findings directory/link, release the claim, validate, and commit.

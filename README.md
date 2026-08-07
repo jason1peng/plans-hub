@@ -15,7 +15,7 @@ PLANCTL="$HOME/.agents/skills/shared-plan-storage/bin/planctl"
 "$PLANCTL" roots
 ```
 
-The installer links the client skill but does not add `planctl` to `PATH`; invoke the installed wrapper as shown above or use `scripts/planctl.py` from this checkout. It does not select or create private storage. When the roots registry below names exactly one existing hub, the installer also validates that hub and safely upgrades the legacy `shared-plan-storage` link from that hub's former `skills/` directory; with zero or multiple registered hubs it skips detection rather than guessing, and unrelated links and files are never replaced.
+The installer links the client skill but does not add `planctl` to `PATH`; invoke the installed wrapper as shown above or use `scripts/planctl.py` from this checkout. The installed skill locations (`~/.agents/skills/shared-plan-storage`, `~/.pi/agent/skills/shared-plan-storage`, or optional `~/.claude/skills/shared-plan-storage`) are client locations, not plan hubs, and are never used as `--root` values. The installer does not select or create private storage. When the roots registry below names exactly one existing hub, the installer also validates that hub and safely upgrades the legacy `shared-plan-storage` link from that hub's former `skills/` directory; with zero or multiple registered hubs it skips detection rather than guessing, and unrelated links and files are never replaced.
 
 ## Create or select a private hub
 
@@ -36,10 +36,11 @@ Then register the hub in the roots registry at `~/.config/plans-hub/roots.json` 
 }
 ```
 
-With exactly one registered root, single-hub commands resolve it without any flags:
+With exactly one registered root, the CLI can resolve a single-hub command without a flag. Agents must retain the resolved absolute path as `HUB_ROOT` and pass it explicitly to every subsequent single-hub command:
 
 ```sh
-scripts/planctl.py validate
+HUB_ROOT=/absolute/path/to/private-hub  # path from `roots --json`
+scripts/planctl.py --root "$HUB_ROOT" validate
 ```
 
 `--root PATH|NAME` overrides the registry for one invocation. There is intentionally no fallback to the public client checkout, and no environment variable selects a hub: the registry is the only ambient root source. Keep the hub remote private and use credential helpers or SSH; do not put tokens in remote URLs or committed files.
@@ -76,7 +77,7 @@ scripts/planctl.py locate DEMO-001    # find which hub manages an ID: unique | n
 
 Both support `--json` with `schema_version`, and `locate` exits 0 for every outcome — agents consume the `result` field, not exit codes.
 
-Agent workflow policy lives in the installed skill: when saving a new plan with multiple valid roots and no named hub, the agent asks which hub to use; when a bare plan ID is referenced without a hub, `planctl locate` scans every configured hub, and only the resolved hub is fetched and fast-forwarded before any mutation. Plan ID prefixes are independent namespaces per hub — the same ID may legitimately exist in two hubs, in which case `locate` reports `ambiguous` and the user picks one.
+Agent workflow policy lives in the installed skill: skill-discovery directories and the public client checkout are never storage roots. When saving a new plan with multiple valid roots and no named hub, the agent asks which hub to use; when a bare plan ID is referenced without a hub, `planctl locate` scans every configured hub, and only the resolved hub is fetched and fast-forwarded before any mutation. After `roots` or `locate` resolves a hub, the agent carries its absolute `path`/`hub` as `HUB_ROOT` and passes `--root "$HUB_ROOT"` to every subsequent single-hub `planctl` command. Plan ID prefixes are independent namespaces per hub — the same ID may legitimately exist in two hubs, in which case `locate` reports `ambiguous` and the user picks one.
 
 ## Datastore contract and scanning
 
@@ -90,11 +91,11 @@ The private repository is a passive Git-backed datastore; this client owns the m
 
 Other Markdown deposited by any authoring tool is raw, unmanaged input. It remains in the datastore but is inactive: it cannot become ready, satisfy a dependency, receive a claim, or influence ID allocation. A raw file that mentions an active or duplicate ID is reported as ambiguous and blocks policy-aware operations until reviewed; unrelated raw input does not block managed work.
 
-Scan without changing any file:
+Scan without changing any file. After resolving a hub, carry its absolute path in `HUB_ROOT` and keep the explicit root on each command:
 
 ```sh
-scripts/planctl.py scan                # single registered hub; otherwise pass --root NAME
-scripts/planctl.py scan --json
+scripts/planctl.py --root "$HUB_ROOT" scan
+scripts/planctl.py --root "$HUB_ROOT" scan --json
 ```
 
 Structured output has `schema_version`, project, `managed_plans`, `managed_research`, unmanaged-file, diagnostic, and clean-state fields. Diagnostics cover filename/metadata disagreement, malformed or duplicate IDs, lifecycle mismatches, missing or stale orchestration rows, dependency targets and cycles, claims, findings links, and research registry/backlink state. Consumers must use fields rather than scrape human-readable prose.
@@ -133,12 +134,12 @@ A missing scope is clarified rather than inferred. Saving research creates no pl
 
 ## Reviewable repair proposals
 
-`repair` is dry-run by default. It classifies proposals as `automatic-safe`, `approval-required`, or `unsupported` and never commits or pushes:
+`repair` is dry-run by default. After resolving a hub, pass the carried `HUB_ROOT` explicitly. It classifies proposals as `automatic-safe`, `approval-required`, or `unsupported` and never commits or pushes:
 
 ```sh
-scripts/planctl.py repair --json                    # single registered hub; otherwise pass --root NAME
-scripts/planctl.py repair --apply --json            # automatic-safe proposals only
-scripts/planctl.py repair --llm --json              # provider-agnostic proposal handoff
+scripts/planctl.py --root "$HUB_ROOT" repair --json
+scripts/planctl.py --root "$HUB_ROOT" repair --apply --json   # automatic-safe proposals only
+scripts/planctl.py --root "$HUB_ROOT" repair --llm --json     # provider-agnostic proposal handoff
 ```
 
 Automatic repair is restricted to structural facts whose status and ID agree, such as normalizing only a plan-name slug. Registering any raw input in orchestration always requires explicit approval, and `--apply` never activates raw input. `--apply` refuses while any semantic or ambiguous diagnostic remains. The LLM handoff contains structured diagnostics and explicit constraints; it can propose a patch only. ID assignment, registration, lifecycle, dependencies, claims, deletion, conflict resolution, application, commits, and pushes always remain explicit host/user actions.
@@ -148,23 +149,26 @@ Automatic repair is restricted to structural facts whose status and ID agree, su
 The first release uses explicit, low-contention Git synchronization rather than claiming atomic distributed scheduling:
 
 ```sh
-git -C /path/to/private-hub fetch origin
-git -C /path/to/private-hub merge --ff-only origin/main
-scripts/planctl.py --root private list-ready
-scripts/planctl.py --root private claim DEMO-001 agent-name
-scripts/planctl.py --root private validate
-git -C /path/to/private-hub add ORCHESTRATION.md
-git -C /path/to/private-hub commit -m 'plans(DEMO-001): claim'
-git -C /path/to/private-hub push origin main       # never force
+PLANCTL="$HOME/.agents/skills/shared-plan-storage/bin/planctl"
+HUB_ROOT=/path/to/private-hub                 # absolute path from roots/locate
+
+git -C "$HUB_ROOT" fetch origin
+git -C "$HUB_ROOT" merge --ff-only origin/main
+"$PLANCTL" --root "$HUB_ROOT" list-ready
+"$PLANCTL" --root "$HUB_ROOT" claim DEMO-001 agent-name
+"$PLANCTL" --root "$HUB_ROOT" validate
+git -C "$HUB_ROOT" add ORCHESTRATION.md
+git -C "$HUB_ROOT" commit -m 'plans(DEMO-001): claim'
+git -C "$HUB_ROOT" push origin main       # never force
 ```
 
 If the push is rejected because the remote advanced, do not try another fast-forward merge: the rejected local claim commit and remote branch have already diverged. Confirm the rejected claim commit is the unpublished `HEAD` and the worktree has no unrelated changes, then discard only that rejected commit and re-evaluate the remote state:
 
 ```sh
-git -C /path/to/private-hub fetch origin
-git -C /path/to/private-hub reset --keep origin/main
-scripts/planctl.py --root private show DEMO-001
-scripts/planctl.py --root private ready DEMO-001
+git -C "$HUB_ROOT" fetch origin
+git -C "$HUB_ROOT" reset --keep origin/main
+"$PLANCTL" --root "$HUB_ROOT" show DEMO-001
+"$PLANCTL" --root "$HUB_ROOT" ready DEMO-001
 ```
 
 Inspect the current claim and dependencies before deciding whether to make a new claim. If `reset --keep` refuses because of local changes, stop and preserve/reconcile them manually; do not use `--hard`, blindly replay the rejected claim, or force-push shared state. Concurrent allocation and claims across clones require manual coordination in this release.
