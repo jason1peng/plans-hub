@@ -15,7 +15,27 @@ The public client checkout contains software only. Select private plan-hub check
 
 Single-hub commands resolve exactly one root: `--root PATH|NAME` beats a single-root registry; a multi-root registry never guesses and asks for `--root NAME`. When a bare ID fails in the resolved hub and multiple hubs are configured, planctl suggests `planctl locate <ID>`.
 
-Before changing state, read the selected hub's `AGENTS.md`, `README.md`, and `ORCHESTRATION.md`. Use `planctl scan` for a read-only inventory; raw or malformed Markdown remains inactive until it satisfies the public client's managed-plan contract. Resolve an existing plan with `planctl show <ID>` and use its returned path. Run `planctl ready <ID>` and claim eligible work before implementation. Do not implement blocked, planning, or claimed work.
+Before changing state, read the selected hub's `AGENTS.md`, `README.md`, and `ORCHESTRATION.md`; read `RESEARCH.md` when present before a research mutation. Use `planctl scan` for a read-only inventory; raw or malformed Markdown remains inactive until it satisfies the public client's managed-plan contract. Resolve an existing plan with `planctl show <ID>` and use its returned path. Run `planctl ready <ID>` and claim eligible work before implementation. Do not implement blocked, planning, or claimed work.
+
+## Save durable research before a plan
+
+Research is a first-class artifact, not a plan status or temporary `findings/` directory. Save it only after an explicit request; never capture every conversation automatically, infer a missing project, cancel it on conversion, or delete it when a plan is created. Managed records live in the selected hub's `research/` directory and are indexed by the optional `RESEARCH.md` registry. They use hub-local `RES-###` IDs, scopes `project`, `cross-project`, or `unknown`, and lifecycle `open -> converted|cancelled -> archived`.
+
+Resolve the hub with the same roots policy as plans. Ask for a project when `project` scope omits one; preserve explicit cross-project and unknown scope. Allocate, validate, and return the absolute path without creating a plan, claim, dependency, or readiness state:
+
+```text
+Save these findings as project-scoped research for `demo-project`, titled “Checkout flow investigation”. Do not create a plan yet.
+
+Save these findings as cross-project research titled “Authentication options”. Do not create a plan yet.
+
+Save this as unscoped research titled “API investigation”. Do not infer a project or create a plan.
+
+Append these findings to research `<research-id>`; leave it open.
+
+Create a plan from research `<research-id>` for `demo-project`.
+```
+
+Use `planctl research allocate`, `planctl research show`, `planctl research status`, and `planctl research link` for policy-aware operations. A plan created with `--from-research` or an explicit link records both sides of the relationship, changes open research to `converted`, and retains the research path and decision context. Linking is explicit; merely seeing a research file never converts it. Cross-project or unknown research may be converted for a selected project, while project-scoped research must match that project.
 
 ## Synchronization and safety
 

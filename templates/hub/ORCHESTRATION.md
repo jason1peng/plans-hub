@@ -1,6 +1,6 @@
 # Plan Orchestration
 
-This file stores the prefix registry, dependency rows, claims, and retired IDs. The external plans client owns validation and maintenance policy; preserve existing state when using other tools.
+This file stores the prefix registry, dependency rows, claims, and retired plan IDs. Research is intentionally not stored here: it has a separate `RESEARCH.md` registry and `RES-###` namespace. The external plans client owns validation and maintenance policy; preserve existing state when using other tools.
 
 ## Project prefix registry
 
@@ -20,4 +20,4 @@ This file stores the prefix registry, dependency rows, claims, and retired IDs. 
 
 ## Stable safety
 
-Synchronize before changing shared state, preserve IDs, never force-push, and re-evaluate after a rejected push.
+Synchronize before changing shared state, preserve IDs, never force-push, and re-evaluate after a rejected push. Research links are explicit and do not add edges to the plan dependency graph.

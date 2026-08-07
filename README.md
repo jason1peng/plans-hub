@@ -97,7 +97,39 @@ scripts/planctl.py scan                # single registered hub; otherwise pass -
 scripts/planctl.py scan --json
 ```
 
-Structured output has `schema_version`, project, managed-plan, unmanaged-file, diagnostic, and clean-state fields. Diagnostics cover filename/metadata disagreement, malformed or duplicate IDs, lifecycle mismatches, missing or stale orchestration rows, dependency targets and cycles, claims, and findings links. Consumers must use fields rather than scrape human-readable prose.
+Structured output has `schema_version`, project, `managed_plans`, `managed_research`, unmanaged-file, diagnostic, and clean-state fields. Diagnostics cover filename/metadata disagreement, malformed or duplicate IDs, lifecycle mismatches, missing or stale orchestration rows, dependency targets and cycles, claims, findings links, and research registry/backlink state. Consumers must use fields rather than scrape human-readable prose.
+
+## First-class research artifacts
+
+A private hub can preserve investigation and requirements discussions before an implementation plan exists. Research is separate from plan lifecycle, readiness, claims, dependencies, and temporary `findings/` state. Managed records use hub-local `RES-###` IDs under `research/` and are indexed by `RESEARCH.md` when research is first allocated. A fresh `planctl init` includes the empty registry; older hubs without it remain valid until research is created.
+
+Each record declares `Scope: project`, `Scope: cross-project`, or `Scope: unknown`, with project names recorded separately. Project scope requires an explicit registered project; cross-project and unknown scope may have no project. Records move `open` to `converted` or `cancelled`, then to `archived`. Conversion retains the original record and records every resulting plan on both sides. Research never enters the plan dependency graph, ready list, claim state, or plan ID allocator.
+
+Use the explicit namespace commands (and return the absolute path printed by the client):
+
+```sh
+scripts/planctl.py --root private research allocate --scope project --project demo-project --title 'Checkout flow investigation'
+scripts/planctl.py --root private research show <research-id>
+scripts/planctl.py --root private research status <research-id> archived
+scripts/planctl.py --root private research link <research-id> DEMO-001
+scripts/planctl.py --root private allocate DEMO checkout --from-research <research-id>
+```
+
+The installed agent skill documents this prompt contract:
+
+```text
+Save these findings as project-scoped research for `demo-project`, titled “Checkout flow investigation”. Do not create a plan yet.
+
+Save these findings as cross-project research titled “Authentication options”. Do not create a plan yet.
+
+Save this as unscoped research titled “API investigation”. Do not infer a project or create a plan.
+
+Append these findings to research `<research-id>`; leave it open.
+
+Create a plan from research `<research-id>` for `demo-project`.
+```
+
+A missing scope is clarified rather than inferred. Saving research creates no plan or implementation state, and merely seeing a research file never converts it. Do not auto-cancel or delete durable research when conversion completes.
 
 ## Reviewable repair proposals
 

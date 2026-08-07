@@ -155,6 +155,27 @@ class PublicReleaseGuardTest(unittest.TestCase):
         self.assertIn("index: README.md: forbidden private fragment", result.stderr)
         self.assertIn(private_project, result.stderr)
 
+    def test_rejects_private_research_state_paths_but_allows_public_template(self) -> None:
+        template = self.root / "templates" / "hub"
+        template.mkdir(parents=True)
+        (template / "RESEARCH.md").write_text("# Synthetic registry\n", encoding="utf-8")
+        self.git("add", "templates")
+        self.git("commit", "-qm", "add public research template")
+
+        private = self.root / "research"
+        private.mkdir()
+        research_id = "RES" + "-001"
+        private_name = "open--" + research_id + "--private.md"
+        (private / private_name).write_text("private\n", encoding="utf-8")
+        (self.root / "RESEARCH.md").write_text("private registry\n", encoding="utf-8")
+
+        result = self.guard()
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("private plan-state path: research/" + private_name, result.stderr)
+        self.assertIn("private plan-state path: RESEARCH.md", result.stderr)
+        self.assertNotIn("templates/hub/RESEARCH.md", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

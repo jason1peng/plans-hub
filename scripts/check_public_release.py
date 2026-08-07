@@ -20,8 +20,11 @@ ALLOWED_TOP_LEVEL = {
     "templates",
 }
 PRIVATE_PATH = re.compile(
-    r"(^|/)(?:findings)(?:/|$)|(^|/)(?:planning|ready|verifying|done)--[A-Z][A-Z0-9]*-[0-9]{3,}--"
+    r"(^|/)(?:findings|research)(?:/|$)|(^|/)(?:planning|ready|verifying|done)--[A-Z][A-Z0-9]*-[0-9]{3,}--"
+    r"|(^|/)(?:open|converted|cancelled|archived)--RES-[0-9]{3,}--"
 )
+RESEARCH_REGISTRY_PATH = re.compile(r"(^|/)RESEARCH\.md$")
+PUBLIC_RESEARCH_TEMPLATE = "templates/hub/RESEARCH.md"
 GENERATED_PATH = re.compile(r"(^|/)(?:\.pi-subagents|__pycache__)(?:/|$)|\.py[co]$")
 CREDENTIAL_URL = re.compile(r"https?://[^/\s:@]+:[^/\s@]+@")
 PLAN_IDENTIFIER = re.compile(r"(?<![A-Z0-9])([A-Z][A-Z0-9]*)-[0-9]{3,}(?![A-Z0-9])")
@@ -121,7 +124,7 @@ def main() -> int:
             top = path.split("/", 1)[0]
             if top not in ALLOWED_TOP_LEVEL:
                 errors.append(f"{label}: unexpected top-level path: {path}")
-            if PRIVATE_PATH.search(path):
+            if PRIVATE_PATH.search(path) or (RESEARCH_REGISTRY_PATH.search(path) and path != PUBLIC_RESEARCH_TEMPLATE):
                 errors.append(f"{label}: private plan-state path: {path}")
             if GENERATED_PATH.search(path):
                 errors.append(f"{label}: generated path: {path}")
