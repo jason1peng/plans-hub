@@ -206,6 +206,69 @@ class PublicReleaseGuardTest(unittest.TestCase):
                 f"README is missing a carried HUB_ROOT example for {command}",
             )
 
+    def test_lifecycle_docs_distinguish_transition_gate_claim_and_handoff(self) -> None:
+        repository = GUARD.parent.parent
+        documents = {
+            "README.md": repository / "README.md",
+            "canonical skill": repository / "skills" / "shared-plan-storage" / "SKILL.md",
+            "hub agent template": repository / "templates" / "hub" / "AGENTS.md",
+        }
+        commands = (
+            'planctl --root "$HUB_ROOT" status <ID> ready',
+            'planctl --root "$HUB_ROOT" ready <ID>',
+            'planctl --root "$HUB_ROOT" claim <ID> <agent>',
+        )
+        handoff_fields = (
+            "Plan:",
+            "Path:",
+            "Owner:",
+            "Phase:",
+            "Scope:",
+            "Non-goals:",
+            "Acceptance evidence:",
+            "Delivery requirements:",
+            "Return artifacts:",
+        )
+        for name, path in documents.items():
+            text = path.read_text(encoding="utf-8")
+            lifecycle = text[text.index("## Plan lifecycle"):]
+            positions = []
+            for command in commands:
+                self.assertIn(command, lifecycle, f"{name} is missing {command}")
+                positions.append(lifecycle.index(command))
+            self.assertEqual(sorted(positions), positions, f"{name} changes the lifecycle order")
+            self.assertIn("read-only", lifecycle.lower(), f"{name} does not mark ready as read-only")
+            self.assertIn("fresh worktree", lifecycle.lower(), f"{name} omits the fresh-worktree boundary")
+            self.assertIn("delivery state machine", lifecycle.lower(), f"{name} omits delivery-state-machine guidance")
+            self.assertIn("intercom", lifecycle.lower(), f"{name} omits the intercom boundary")
+            self.assertIn(
+                "intercom receipt is not completion evidence", lifecycle.lower(),
+                f"{name} weakens the intercom boundary",
+            )
+            self.assertIn("Handoff version: 1", lifecycle, f"{name} omits handoff versioning")
+            for field in handoff_fields:
+                self.assertIn(field, lifecycle, f"{name} is missing handoff field {field}")
+
+        readme = documents["README.md"].read_text(encoding="utf-8")
+        self.assertIn("planctl roots --json", readme)
+        self.assertIn("planctl locate <ID> --json", readme)
+        self.assertIn('"$PLANCTL" --root "$HUB_ROOT"', readme)
+        self.assertNotIn("status-ready", readme)
+
+    def test_skill_allows_implementation_after_own_claim(self) -> None:
+        repository = GUARD.parent.parent
+        skill = (repository / "skills" / "shared-plan-storage" / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "Do not implement blocked or planning work, or plans claimed by another agent.",
+            skill,
+        )
+        self.assertIn(
+            "After your own successful readiness gate and claim, implementation may begin.",
+            skill,
+        )
+        self.assertNotIn("Do not implement blocked, planning, or claimed work.", skill)
+
 
 if __name__ == "__main__":
     unittest.main()

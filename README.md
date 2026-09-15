@@ -79,6 +79,135 @@ Both support `--json` with `schema_version`, and `locate` exits 0 for every outc
 
 Agent workflow policy lives in the installed skill: skill-discovery directories and the public client checkout are never storage roots. When saving a new plan with multiple valid roots and no named hub, the agent asks which hub to use; when a bare plan ID is referenced without a hub, `planctl locate` scans every configured hub, and only the resolved hub is fetched and fast-forwarded before any mutation. After `roots` or `locate` resolves a hub, the agent carries its absolute `path`/`hub` as `HUB_ROOT` and passes `--root "$HUB_ROOT"` to every subsequent single-hub `planctl` command. Plan ID prefixes are independent namespaces per hub — the same ID may legitimately exist in two hubs, in which case `locate` reports `ambiguous` and the user picks one.
 
+## Plan lifecycle and delivery workflow
+
+Approval, lifecycle, start eligibility, and ownership are separate steps. Keep their owners and effects distinct:
+
+| Step | Owner | Command | Effect |
+| --- | --- | --- | --- |
+| Transition an approved plan | Plan author or approver | `planctl --root "$HUB_ROOT" status <ID> ready` | State-changing `planning` → `ready` transition. Run only after explicit approval; it does not run the start gate or claim the plan. |
+| Check start eligibility | Worker | `planctl --root "$HUB_ROOT" ready <ID>` | **Read-only** start gate. Confirms the managed plan is ready, unclaimed, and has completed dependencies; it changes no files or claims. |
+| Claim work | Worker | `planctl --root "$HUB_ROOT" claim <ID> <agent>` | Records ownership after the read-only gate; it is neither approval nor a lifecycle transition. Validate, commit, and synchronize this state change. |
+
+Approval is a human or team decision; `planctl` does not infer approval from plan text, a successful sync, or a `ready` result. For a plan in `planning`, the approver must explicitly run `status ... ready` before a worker runs the read-only gate. A worker must pass `ready <ID>` and then claim before implementation. If the gate fails, stop and resolve its reported validation, dependency, or claim issue rather than bypassing it.
+
+### Multi-root and approved-plan handoff
+
+Use this path when a new plan may belong to one of several hubs, or when approval and implementation happen in different sessions. Run `planctl roots --json` to choose a valid root for a new plan; for an existing bare ID, run `planctl locate <ID> --json` and require a unique result. Root discovery is the only cross-root step; after choosing a hub, carry its absolute path as `HUB_ROOT` and keep the explicit root on every single-hub command.
+
+For a new plan, allocate, write, validate, and publish the plan before asking for approval. `allocate` prints the stable ID and absolute path; keep those values, edit that returned file, and use the corresponding relative path when staging:
+
+```sh
+PLANCTL="$HOME/.agents/skills/shared-plan-storage/bin/planctl"
+"$PLANCTL" roots --json
+HUB_ROOT=/absolute/path/of-the-selected-root
+
+git -C "$HUB_ROOT" fetch origin
+git -C "$HUB_ROOT" merge --ff-only origin/main
+"$PLANCTL" --root "$HUB_ROOT" allocate DEMO approved-plan
+# Edit the absolute path printed by allocate, then set its values here.
+PLAN_ID=DEMO-001
+PLAN_PATH=demo-project/planning--DEMO-001--approved-plan.md
+"$PLANCTL" --root "$HUB_ROOT" validate
+git -C "$HUB_ROOT" add -- "$PLAN_PATH" ORCHESTRATION.md
+git -C "$HUB_ROOT" commit -m 'plans(DEMO-001): add plan'
+git -C "$HUB_ROOT" push origin main
+
+# After explicit approval, the approver runs the lifecycle transition.
+"$PLANCTL" --root "$HUB_ROOT" status "$PLAN_ID" ready
+PLAN_PATH=demo-project/ready--DEMO-001--approved-plan.md
+"$PLANCTL" --root "$HUB_ROOT" validate
+git -C "$HUB_ROOT" add -- "$PLAN_PATH"
+git -C "$HUB_ROOT" commit -m 'plans(DEMO-001): mark ready'
+git -C "$HUB_ROOT" push origin main
+```
+
+For an existing bare ID, run the read-only cross-root lookup first, choose its unique hit, and use its returned hub/path instead of allocating. If `show` already reports `ready`, do not repeat the transition; continue with the worker gate and claim:
+
+```sh
+"$PLANCTL" locate DEMO-001 --json
+HUB_ROOT=/absolute/path/from-the-unique-hit
+"$PLANCTL" --root "$HUB_ROOT" show DEMO-001
+# If status is planning, run this after explicit approval (skip it when already ready):
+"$PLANCTL" --root "$HUB_ROOT" status DEMO-001 ready
+PLAN_PATH=path/printed-by-status
+"$PLANCTL" --root "$HUB_ROOT" validate
+git -C "$HUB_ROOT" add -- "$PLAN_PATH"
+git -C "$HUB_ROOT" commit -m 'plans(DEMO-001): mark ready'
+git -C "$HUB_ROOT" push origin main
+```
+
+When the existing plan was already `ready`, skip the status-change commit and continue with the worker block below. When there is more than one valid root, ask which hub to use; never allocate or mutate an unselected root. The receiving worker synchronizes the resolved hub again, then performs the independent gate and claim:
+
+```sh
+git -C "$HUB_ROOT" fetch origin
+git -C "$HUB_ROOT" merge --ff-only origin/main
+"$PLANCTL" --root "$HUB_ROOT" ready DEMO-001       # read-only; stop if this fails
+"$PLANCTL" --root "$HUB_ROOT" claim DEMO-001 worker-name
+"$PLANCTL" --root "$HUB_ROOT" validate
+git -C "$HUB_ROOT" add ORCHESTRATION.md
+git -C "$HUB_ROOT" commit -m 'plans(DEMO-001): claim'
+git -C "$HUB_ROOT" push origin main
+```
+
+Only the cross-session handoff is conditional. Synchronization, explicit approval, the read-only readiness gate, claim, validation, and non-force Git publication remain required. After claiming, implement from a fresh worktree created from the latest `main` of the implementation repository—not from the plan hub, public client checkout, or a planning branch—and follow the delivery state machine's implementation, verification, review, and close gates. A plan claim does not replace those delivery gates.
+
+### Single-repository path without a worker handoff
+
+When the same agent handles approval and implementation, omit `locate` and intercom, but do not omit lifecycle or safety steps. Resolve one hub, synchronize it, and use this order:
+
+```sh
+HUB_ROOT=/absolute/path/to/private-hub
+PLANCTL="$HOME/.agents/skills/shared-plan-storage/bin/planctl"
+
+git -C "$HUB_ROOT" fetch origin
+git -C "$HUB_ROOT" merge --ff-only origin/main
+"$PLANCTL" --root "$HUB_ROOT" show DEMO-001
+# After explicit approval:
+"$PLANCTL" --root "$HUB_ROOT" status DEMO-001 ready
+# Refresh PLAN_PATH with the ready path printed by status before staging.
+PLAN_PATH=path/printed-by-status
+"$PLANCTL" --root "$HUB_ROOT" validate
+git -C "$HUB_ROOT" add -- "$PLAN_PATH"
+git -C "$HUB_ROOT" commit -m 'plans(DEMO-001): mark ready'
+git -C "$HUB_ROOT" push origin main
+# The same agent still runs the read-only gate before claiming.
+"$PLANCTL" --root "$HUB_ROOT" ready DEMO-001
+"$PLANCTL" --root "$HUB_ROOT" claim DEMO-001 agent-name
+"$PLANCTL" --root "$HUB_ROOT" validate
+git -C "$HUB_ROOT" add ORCHESTRATION.md
+git -C "$HUB_ROOT" commit -m 'plans(DEMO-001): claim'
+git -C "$HUB_ROOT" push origin main
+```
+
+Create the implementation worktree from the latest implementation-repository `main` and run the delivery state machine in that worktree. Intercom is unnecessary on this path; the readiness gate and claim are still mandatory.
+
+### Reusable intercom handoff template
+
+For a separate worker session, send a completed handoff as part of dispatch after approval has been recorded. Intercom is transport only, not a planctl operation: the recipient must verify the path, synchronize the selected hub, run the read-only readiness gate, and claim independently, and an intercom receipt is not completion evidence. Intercom reachability, a live session, and a GitLab/MR link are never prerequisites for planctl validation, readiness, or claim; if dispatch requires a handoff and intercom is unavailable, use the delivery coordinator's approved fallback rather than bypassing a gate. Carry only bounded handoff metadata and opaque artifact references, never credentials, cookies, raw logs, or private plan content.
+
+Copy and complete this message without placing private plan content in public documentation:
+
+```text
+Approved plan handoff
+Handoff version: 1
+Plan: <ID>
+Path: <absolute plan path returned by planctl show>
+Owner: <receiving session/agent name; use the same value for claim>
+Phase: <delivery phase, e.g. IMPLEMENT>
+Scope:
+- <in-scope behavior, files, or boundaries>
+Non-goals:
+- <explicitly excluded behavior or files>
+Acceptance evidence:
+- <tests, checks, or observable evidence required>
+Delivery requirements:
+- Work from a fresh worktree based on the latest implementation-repository main.
+- Follow the delivery state machine and preserve approval, sync, validation, dependency, claim, and intercom boundaries.
+Return artifacts:
+- <artifact paths, commit/MR details when applicable, test evidence, and clean-worktree status>
+```
+
 ## Datastore contract and scanning
 
 The private repository is a passive Git-backed datastore; this client owns the managed-plan protocol. A managed plan:
@@ -146,7 +275,7 @@ Automatic repair is restricted to structural facts whose status and ID agree, su
 
 ## Team synchronization workflow
 
-The first release uses explicit, low-contention Git synchronization rather than claiming atomic distributed scheduling:
+The first release uses explicit, low-contention Git synchronization rather than claiming atomic distributed scheduling. This claim sequence assumes an approver has already run the explicit `status ... ready` transition; the worker still runs the read-only `ready` gate immediately before claiming:
 
 ```sh
 PLANCTL="$HOME/.agents/skills/shared-plan-storage/bin/planctl"
@@ -155,6 +284,7 @@ HUB_ROOT=/path/to/private-hub                 # absolute path from roots/locate
 git -C "$HUB_ROOT" fetch origin
 git -C "$HUB_ROOT" merge --ff-only origin/main
 "$PLANCTL" --root "$HUB_ROOT" list-ready
+"$PLANCTL" --root "$HUB_ROOT" ready DEMO-001       # read-only start gate
 "$PLANCTL" --root "$HUB_ROOT" claim DEMO-001 agent-name
 "$PLANCTL" --root "$HUB_ROOT" validate
 git -C "$HUB_ROOT" add ORCHESTRATION.md
