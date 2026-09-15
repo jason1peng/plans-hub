@@ -30,7 +30,97 @@ planctl --root "$HUB_ROOT" claim <ID> agent-name
 planctl --root "$HUB_ROOT" validate
 ```
 
-Before changing state, read `$HUB_ROOT/AGENTS.md`, `$HUB_ROOT/README.md`, and `$HUB_ROOT/ORCHESTRATION.md`; read `$HUB_ROOT/RESEARCH.md` when present before a research mutation. Use `planctl --root "$HUB_ROOT" scan` for a read-only inventory; raw or malformed Markdown remains inactive until it satisfies the public client's managed-plan contract. Resolve an existing plan with `planctl --root "$HUB_ROOT" show <ID>` and use its returned path. Run `planctl --root "$HUB_ROOT" ready <ID>` and claim eligible work before implementation. Do not implement blocked, planning, or claimed work.
+Before changing state, read `$HUB_ROOT/AGENTS.md`, `$HUB_ROOT/README.md`, and `$HUB_ROOT/ORCHESTRATION.md`; read `$HUB_ROOT/RESEARCH.md` when present before a research mutation. Use `planctl --root "$HUB_ROOT" scan` for a read-only inventory; raw or malformed Markdown remains inactive until it satisfies the public client's managed-plan contract. Resolve an existing plan with `planctl --root "$HUB_ROOT" show <ID>` and use its returned path.
+
+## Plan lifecycle and delivery workflow
+
+Approval, lifecycle, start eligibility, and ownership are distinct:
+
+- **Transition after approval (plan author/approver):** `planctl --root "$HUB_ROOT" status <ID> ready` is the state-changing `planning` → `ready` transition. Run it only after explicit human or team approval. It does not check start eligibility or claim the plan.
+- **Readiness gate (worker):** `planctl --root "$HUB_ROOT" ready <ID>` is read-only. It verifies managed `ready` state, an empty claim, and completed dependencies (along with normal validation), and changes no files or claims. If the plan is already `ready`, skip the planning-to-ready transition and start with this gate.
+- **Claim (worker):** `planctl --root "$HUB_ROOT" claim <ID> <agent>` records ownership only after the readiness gate. It is neither approval nor a lifecycle transition; validate, commit, and synchronize the claim.
+
+Do not infer approval from plan text, synchronization, `show`, or a successful readiness check. For a planning plan, the approver records the transition first; a worker then runs the read-only gate and claims before implementation. A failed gate is a stop condition, not permission to bypass dependencies, validation, or an existing claim.
+
+For a new plan, the selected-root owner allocates it, writes the plan at the absolute path printed by `allocate`, validates it, and commits/pushes the plan file plus its orchestration row before requesting approval. After approval, the lifecycle transition and claim are separate commits. Preserve the returned ID and path across sessions.
+
+### Multi-root and approved-plan path
+
+For a new plan with multiple valid roots, run `planctl roots --json`, ask which hub to use, and set `HUB_ROOT` to the selected absolute `path`; never allocate into an unselected root. For an existing bare ID, run `planctl locate <ID> --json`, require a unique result, and carry that result's absolute `hub`. Fetch and fast-forward only the resolved hub before any lookup or mutation:
+
+```sh
+planctl roots --json
+planctl locate <ID> --json                 # existing bare ID only
+HUB_ROOT=/absolute/path/from-roots-or-locate
+
+git -C "$HUB_ROOT" fetch origin
+git -C "$HUB_ROOT" merge --ff-only origin/main
+# For a new plan, allocate only after selecting and syncing this root; retain its ID/path.
+# planctl --root "$HUB_ROOT" allocate DEMO approved-plan
+# For an existing plan, use the unique locate result and its returned path.
+planctl --root "$HUB_ROOT" show <ID>
+# After explicit approval, the approver runs:
+planctl --root "$HUB_ROOT" status <ID> ready
+planctl --root "$HUB_ROOT" validate
+# Commit and push only the intended plan-status change, without force.
+```
+
+The receiving worker synchronizes the same `HUB_ROOT`, re-checks the independent gate, and records the claim:
+
+```sh
+git -C "$HUB_ROOT" fetch origin
+git -C "$HUB_ROOT" merge --ff-only origin/main
+planctl --root "$HUB_ROOT" ready <ID>       # read-only; stop if this fails
+planctl --root "$HUB_ROOT" claim <ID> <agent>
+planctl --root "$HUB_ROOT" validate
+# Commit and push only ORCHESTRATION.md, without force.
+```
+
+### Single-repository path without a worker handoff
+
+If one agent handles approval and implementation, omit cross-root lookup and intercom only. Resolve one hub, synchronize it, run `status <ID> ready` after approval, validate and publish that change, then run the read-only `ready <ID>` gate and claim. The same sync, validation, dependency, claim, fresh-worktree, and delivery-state-machine requirements still apply.
+
+```sh
+HUB_ROOT=/absolute/path/to/private-hub
+git -C "$HUB_ROOT" fetch origin
+git -C "$HUB_ROOT" merge --ff-only origin/main
+planctl --root "$HUB_ROOT" show <ID>
+planctl --root "$HUB_ROOT" status <ID> ready
+planctl --root "$HUB_ROOT" validate
+# Commit and push the status change, without force.
+planctl --root "$HUB_ROOT" ready <ID>
+planctl --root "$HUB_ROOT" claim <ID> <agent>
+planctl --root "$HUB_ROOT" validate
+# Commit and push the claim change, without force.
+```
+
+Implement from a fresh worktree based on the latest `main` of the implementation repository, not from the plan hub, public client checkout, or planning branch. Follow the delivery state machine's implementation, verification, review, and close gates; a plan claim does not replace those gates.
+
+### Reusable intercom handoff template
+
+For a separate worker session, send a completed handoff as part of dispatch after approval is recorded. Intercom is transport only, not a lifecycle operation: the recipient must read the plan at its returned path, synchronize, run `ready <ID>`, and claim independently, and an intercom receipt is not completion evidence. Intercom reachability, a live session, and GitLab/MR reporting are never prerequisites for planctl validation, readiness, or claim; if dispatch requires a handoff and intercom is unavailable, use the delivery coordinator's approved fallback rather than bypassing a gate. Carry only bounded handoff metadata and opaque artifact references, never credentials, cookies, raw logs, or private plan content.
+
+```text
+Approved plan handoff
+Handoff version: 1
+Plan: <ID>
+Path: <absolute plan path returned by planctl show>
+Owner: <receiving session/agent name; use the same value for claim>
+Phase: <delivery phase, e.g. IMPLEMENT>
+Scope:
+- <in-scope behavior, files, or boundaries>
+Non-goals:
+- <explicitly excluded behavior or files>
+Acceptance evidence:
+- <tests, checks, or observable evidence required>
+Delivery requirements:
+- Use a fresh worktree based on the latest implementation-repository main.
+- Follow the delivery state machine and preserve approval, sync, validation, dependency, claim, and intercom boundaries.
+Return artifacts:
+- <artifact paths, commit/MR details when applicable, test evidence, and clean-worktree status>
+```
+
+Do not implement blocked or planning work, or plans claimed by another agent. After your own successful readiness gate and claim, implementation may begin.
 
 ## Save durable research before a plan
 
